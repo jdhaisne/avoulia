@@ -1,0 +1,21 @@
+# FastAPI & server
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# RAG - LangChain (chat simple) + Haystack (RAG) & Chroma
+langchain==0.3.7
+langchain-openai==0.2.6
+langchain-community==0.3.7
+# chroma-haystack exige chromadb>=1.0.2
+chromadb>=1.0.2
+haystack-ai>=2.0.0
+chroma-haystack>=3.0.0
+
+# Document loading
+pypdf==5.1.0
+python-docx==1.1.2
+openpyxl==3.1.5
+
+# Utils
+python-multipart==0.0.17
+pydantic-settings==2.6.1
