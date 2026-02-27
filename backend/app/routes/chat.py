@@ -6,9 +6,15 @@ from fastapi.responses import StreamingResponse
 from app.config import get_settings
 from app.models import ChatRequest, ChatResponse, SuggestedCase
 from app.rag import chat_simple, chat_simple_stream, stream_prompt
-from app.haystack_rag import query_rag_haystack, get_rag_prompt_and_sources
+from app.haystack_rag import query_rag_haystack, get_rag_prompt_and_sources, WELCOME_MESSAGE
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+@router.get("/welcome")
+def chat_welcome():
+    """Retourne le premier message que l'agent affiche au chargement du chat."""
+    return {"message": WELCOME_MESSAGE}
 
 
 def _sse_line(obj: dict) -> str:

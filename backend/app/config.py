@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     # RAG — CHUNK_SIZE, CHUNK_OVERLAP, TOP_K_RETRIEVE
     chunk_size: int = 1000
     chunk_overlap: int = 200
-    top_k_retrieve: int = 4
+    top_k_retrieve: int = 50
     # USE_RAG : si True, le chat utilise les documents indexés (Chroma) pour répondre ; sinon chat simple (LLM seul)
     use_rag: bool = True
 

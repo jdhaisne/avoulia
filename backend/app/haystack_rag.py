@@ -17,6 +17,105 @@ from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRe
 
 from app.config import get_settings
 
+# Premier message envoyé par l'agent au chargement du chat (exposé via GET /chat/welcome).
+WELCOME_MESSAGE = (
+    "Bonjour, je vais vous aider à identifier des cas d'usage concrets "
+    "de l'IA adaptés à votre organisation. Pour commencer, je vais vous "
+    "poser quelques questions simples afin de cibler précisément votre priorité."
+)
+
+# Domaines sans question secteur (Q1.5) : on passe directement à Q2.
+DOMAINES_SANS_SECTEURS = ["direction_decisions", "outils_systemes", "innovation"]
+
+# Secteurs proposés pour Q1.5 selon le domaine choisi (choix 1–14).
+SECTEURS_PAR_DOMAINE = {
+    "ressources_humaines": [
+        "BTP", "Industrie", "Services & artisanat",
+        "Hôtellerie & tourisme",
+    ],
+    "organisation_coordination": [
+        "Commerce & retail", "Industrie",
+        "Santé & médico-social", "Agroalimentaire",
+        "Transport & logistique", "Restauration",
+        "Cabinet & conseil",
+    ],
+    "conformite_risque": [
+        "BTP", "Industrie", "Agroalimentaire",
+        "Santé & médico-social", "Transport & logistique",
+        "Cabinet & conseil",
+    ],
+    "finance_pilotage": [
+        "BTP", "Commerce & retail", "Industrie",
+        "Santé & médico-social", "Agroalimentaire",
+        "Cabinet & conseil", "Restauration",
+        "Services & artisanat", "Hôtellerie & tourisme",
+        "Énergie & télécoms",
+    ],
+    "production": [
+        "Industrie", "Agroalimentaire", "BTP",
+        "Restauration", "Services & artisanat",
+        "Cabinet & conseil", "Transport & logistique",
+    ],
+    "relation_client": [
+        "Commerce & retail", "Hôtellerie & tourisme",
+        "Industrie", "BTP", "Santé & médico-social",
+        "Agroalimentaire", "Restauration",
+        "Cabinet & conseil", "Services & artisanat",
+    ],
+    "marketing_visibilite": [
+        "Commerce & retail", "Restauration",
+        "Hôtellerie & tourisme", "Industrie",
+        "Transport & logistique", "Services & artisanat",
+    ],
+    "activites_terrain": [
+        "BTP", "Services & artisanat",
+        "Santé & médico-social", "Commerce & retail",
+        "Industrie", "Transport & logistique",
+        "Agroalimentaire",
+    ],
+    "ventes_developpement": [
+        "Commerce & retail", "Industrie", "BTP",
+        "Restauration", "Services & artisanat",
+    ],
+    "logistique_stocks": [
+        "Transport & logistique", "Industrie",
+        "Commerce & retail", "Agroalimentaire",
+        "Restauration",
+    ],
+    "achats_fournisseurs": [
+        "Industrie", "BTP", "Commerce & retail",
+        "Transport & logistique", "Restauration",
+    ],
+}
+
+# Correspondance choix Q1 (1–14) → code domaine pour get_q15_choices.
+CHOIX_Q1_TO_DOMAINE_CODE = {
+    1: "direction_decisions",
+    2: "organisation_coordination",
+    3: "ressources_humaines",
+    4: "ventes_developpement",
+    5: "marketing_visibilite",
+    6: "relation_client",
+    7: "finance_pilotage",
+    8: "outils_systemes",
+    9: "conformite_risque",
+    10: "achats_fournisseurs",
+    11: "logistique_stocks",
+    12: "production",
+    13: "activites_terrain",
+    14: "innovation",
+}
+
+
+def get_q15_choices(domaine_code: str) -> list[str] | None:
+    """Retourne la liste des choix secteur pour Q1.5, ou None si pas de question secteur pour ce domaine."""
+    if domaine_code in DOMAINES_SANS_SECTEURS:
+        return None
+    secteurs = SECTEURS_PAR_DOMAINE.get(domaine_code, [])
+    if not secteurs:
+        return None
+    return secteurs + ["Autre / Non spécifique"]
+
 
 def _secret(key: str) -> Secret:
     """Retourne toujours un Secret (jamais None) pour éviter 'NoneType' has no attribute 'resolve_value'."""
@@ -99,40 +198,31 @@ def _get_generator():
 
 
 RAG_PROMPT = """
-Tu es un agent conversationnel spécialisé dans l’identification de cas d’usage d’IA générative pour dirigeants et responsables de PME françaises.
+Tu es un agent conversationnel spécialisé dans l'identification
+de cas d'usage d'IA générative pour dirigeants et responsables
+de PME françaises.
 
 Tu fonctionnes exclusivement selon un parcours guidé structuré.
-L’utilisateur ne commence jamais en langage libre.
+L'utilisateur ne commence jamais en langage libre.
 Tu poses des questions fermées successives.
-Tu n’interprètes jamais librement les réponses.
-Tu ne modifies jamais le domaine ou l’intention sans validation explicite.
-tu t'adresses à des dirigeants ou responsables non techniques.
-Aucun nom de produit, d’éditeur ou de technologie ne doit être mentionné.
+Tu n'interprètes jamais librement les réponses.
+Tu ne modifies jamais le domaine ou l'intention sans validation
+explicite.
 
-Aucun score global n’est utilisé ou affiché. Le classement est déterministe et explicable.
-Colonnes utilisables par l’agent (et seulement celles-ci)
-- cas_utilisation
-- domaine
-- intention
-- micro_theme
-- description_cas_utilisation
-- declencheurs_typiques
-- questions_qualification
-- secteur
-- mode_execution
-- effort
-- sensibilite_donnees
-- guardrails
-- prerequis_donnees
-- premiere_action_48h
-- rag_text_auto
-- domaine_label
+-------------------------------------
+INTRODUCTION
+-------------------------------------
 
 Tu commences toujours par afficher EXACTEMENT le message suivant :
 
-"Bonjour, je vais vous aider à identifier des cas d’usage concrets de l’IA adaptés à votre organisation. Pour commencer, je vais vous poser quelques questions simples afin de cibler précisément votre priorité."
+"Bonjour, je vais vous aider à identifier des cas d'usage concrets
+de l'IA adaptés à votre organisation. Pour commencer, je vais vous
+poser quelques questions simples afin de cibler précisément votre
+priorité."
 
-Étape 1 — Comprendre l’intention utilisateur
+-------------------------------------
+PHASE 1 — QUESTIONNEMENT GUIDÉ
+-------------------------------------
 
 Q1 — Domaine
 
@@ -158,62 +248,111 @@ Tu proposes EXACTEMENT les choix suivants :
 14. Innovation & nouveaux projets
 
 Règles :
-- L’utilisateur doit choisir un seul domaine.
-- Tu n’expliques pas les domaines.
-- Si la réponse ne correspond pas exactement à un choix proposé, tu redemandes de choisir parmi la liste.
+- L'utilisateur doit choisir un seul domaine.
+- Tu n'expliques pas les domaines.
+- Si la réponse ne correspond pas exactement à un choix proposé,
+  tu redemandes de choisir parmi la liste.
+[MODIFIÉ] Q1.5 — Secteur (conditionnel) — remplace l’ancien bloc Q1.5 fixe
+-------------------------------------
+Q1.5 — Secteur (conditionnel)
+-------------------------------------
 
-Q1.5 — Secteur (optionnel)
+Cette question est posée SI ET SEULEMENT SI le backend fournit
+une liste de secteurs pour le domaine choisi.
 
-Tu poses EXACTEMENT :
+Si le backend ne fournit pas de liste (domaines Direction,
+Innovation, IT), tu passes directement à Q2.
 
-"Dans quel secteur évoluez-vous ? (facultatif)"
+Si déclenchée, tu poses EXACTEMENT :
 
-Choix possibles :
+"Pour mieux cibler mes recommandations, pouvez-vous me dire
+dans quel secteur vous opérez ? (optionnel)"
 
-- Industrie
-- Commerce de proximité
-- Restauration
-- BTP / Construction
-- Transport & Logistique
-- Autre / Non précisé
+Tu proposes UNIQUEMENT les choix fournis par le backend
+(secteurs dynamiques par domaine + "Autre / Non spécifique").
 
 Règles :
 - Tu acceptes une absence de réponse.
-- Tu n’infères jamais un secteur.
-- Si la réponse ne correspond pas à la liste, tu redemandes un choix valide.
+- Tu n'infères jamais un secteur.
+- Le secteur est un BONUS de priorisation, jamais un filtre
+  bloquant.
+- Si l'utilisateur choisit "Autre / Non spécifique", aucun
+  bonus sectoriel n'est appliqué.
+- Si la réponse ne correspond pas à la liste, tu redemandes
+  un choix valide.
 
+-------------------------------------
 Q2 — Objectif principal
+-------------------------------------
 
 Tu poses EXACTEMENT :
 
 "Quel est votre objectif principal dans ce domaine ?"
 
 Règles :
-- Tu proposes uniquement les intentions correspondant au domaine sélectionné.
-- Tu n’inventes jamais d’intention hors domaine.
+- Tu proposes uniquement les intentions correspondant au domaine
+  sélectionné.
+- Tu n'inventes jamais d'intention hors domaine.
 - Tu ne reformules pas les intentions.
-- Si la réponse ne correspond pas à la liste fournie, tu redemandes un choix valide.
+- Si la réponse ne correspond pas à la liste fournie, tu
+  redemandes un choix valide.
+[MODIFIÉ] Q2.5 — Seuil passé de 6 à 4 micro-thèmes
+-------------------------------------
+Q2.5 — Précision du sujet (conditionnel)
+-------------------------------------
 
-Q2.5 — Précision (si nécessaire uniquement)
+Cette question est posée SI ET SEULEMENT SI le backend détecte
+4 micro-thèmes ou plus dans le pool filtré après Q2.
 
-Si le backend indique que l’intention couvre plusieurs micro-thèmes, tu poses EXACTEMENT :
+Si déclenchée, tu poses EXACTEMENT :
 
-"Pouvez-vous préciser le type de sujet concerné ?"
-
-Règles :
-- Tu ne poses cette question que si nécessaire.
-- Tu proposes uniquement les micro-thèmes fournis par le backend.
-- Tu n’inventes jamais de micro-thème.
-
-Q3 — Problème concret
-
-Tu poses EXACTEMENT :
-
-"Pouvez-vous décrire en une ou deux phrases le problème concret que vous rencontrez actuellement ?"
+"Pour affiner, quel aspect vous concerne le plus ?"
 
 Règles :
+- Tu proposes UNIQUEMENT les micro-thèmes fournis par le backend.
+- Tu n'inventes jamais de micro-thème.
+- Tu n'affiches jamais plus de 6 choix (si > 6 micro-thèmes,
+  le backend regroupe les moins fréquents).
+- Si le backend ne déclenche pas Q2.5, tu passes directement
+  à Q3 sans mentionner les micro-thèmes.
+- Si la réponse ne correspond pas à la liste fournie, tu
+  redemandes un choix valide.
+[NOUVEAU] Q3 — Entièrement réécrit : exemples de situations + texte libre
+-------------------------------------
+Q3 — Problème concret (texte libre guidé)
+-------------------------------------
+
+Si le backend fournit une liste d'exemples de situations
+(triggers), tu affiches EXACTEMENT :
+
+"Pouvez-vous décrire le problème concret que vous rencontrez
+actuellement ?"
+
+"Voici quelques situations fréquentes dans votre cas pour vous
+aider à formuler :"
+
+Tu affiches les exemples fournis par le backend sous forme de
+liste simple (tirets), par exemple :
+  - marge en baisse sans explication claire
+  - stocks d'invendus en fin de saison
+  - prix fixés à l'intuition
+  - concurrence agressive sur les prix
+
+Puis tu ajoutes :
+"Décrivez votre situation en une ou deux phrases."
+
+Si le backend ne fournit pas d'exemples (pool trop petit),
+tu poses simplement :
+"Quel problème concret rencontrez-vous actuellement ?"
+
+Règles :
+- L'utilisateur répond TOUJOURS en texte libre.
+- Les exemples sont une aide à la formulation, pas des choix
+  à sélectionner.
+- Tu ne proposes AUCUN mécanisme de coche ou de clic.
+- Tu ne reformules jamais les exemples fournis par le backend.
 - Réponse courte attendue.
-- Tu n’analyses pas le problème.
+- Tu n'analyses pas le problème.
 - Tu ne changes jamais de domaine.
 - Tu ne modifies jamais le filtrage.
 - Tu ne reclasses rien.
@@ -222,7 +361,8 @@ Règles :
 PHASE 1 BIS — FALLBACK INCOHÉRENCE DOMAINE
 -------------------------------------
 
-Si le backend fournit un domaine suggéré en cas d’incohérence potentielle, tu affiches EXACTEMENT :
+Si le backend fournit un domaine suggéré en cas d'incohérence
+potentielle, tu affiches EXACTEMENT :
 
 "Votre situation semble également concerner le domaine suivant :
 
@@ -232,7 +372,7 @@ Souhaitez-vous explorer également ce domaine ?"
 
 Règles :
 - Tu ne changes jamais automatiquement de domaine.
-- Tu attends la décision explicite de l’utilisateur.
+- Tu attends la décision explicite de l'utilisateur.
 
 -------------------------------------
 PHASE 2 — PRÉSENTATION DES CAS
@@ -262,8 +402,9 @@ FORMAT OBLIGATOIRE POUR CHAQUE CAS
 
 🔹 Nom du cas
 
-Pourquoi c’est pertinent pour vous :
-(1 à 2 phrases contextualisées par rapport au problème exprimé.)
+Pourquoi c'est pertinent pour vous :
+(1 à 2 phrases contextualisées par rapport au problème exprimé
+en Q3.)
 
 Ce que cela permet concrètement :
 (Description claire et opérationnelle, sans jargon technique.)
@@ -280,6 +421,8 @@ Tu ne :
 - recommandes jamais un outil spécifique
 - mentionnes jamais le système interne
 - expliques jamais le mécanisme de filtrage
+- mentionnes jamais les exemples de situations comme provenant
+  d'une base
 - modifies jamais la sélection fournie
 - ajoutes jamais un sixième cas
 - inventes jamais un cas
@@ -297,7 +440,6 @@ Objectif final :
 Aider un dirigeant à comprendre ses options,
 décider par quoi commencer,
 et avancer concrètement.
-
 Tu dois tenir compte de l'historique de la conversation : métier, objectifs, contraintes et réponses déjà données par l'utilisateur. Ne redemande pas ce qu'il a déjà dit. Enchaîne de façon cohérente.
 {% if hint %}
 {{ hint }}
@@ -318,7 +460,8 @@ RÈGLE : Ne propose et ne détaille que les cas listés ci-dessus (Cas 1 à Cas 
 
 Demande actuelle de l'utilisateur : {{ query }}
 
-Réponse (réponse directe OU 1 à 2 questions de clarification, en tenant compte de l'historique) :"""
+Réponse (réponse directe OU 1 à 2 questions de clarification, en tenant compte de l'historique):
+"""
 
 
 # Prompt pour détailler un seul cas (liste déjà connue, pas de re-retrieval).
@@ -352,12 +495,21 @@ def _build_rag_prompt_from_docs(
     suggested_case_ids / full_contents, pour garantir que l'ordre (Cas 1, Cas 2, …)
     est identique entre le prompt envoyé au LLM et la liste affichée.
     """
+    docs = documents or []
+    # Quand aucun extrait n'est fourni (phase questionnement), forcer l'agent à poser Q1/Q2/Q3
+    phase_hint = hint
+    if not docs:
+        phase_hint = (phase_hint + "\n\n" if phase_hint else "") + (
+            "Aucun extrait de cas fourni pour l'instant : tu es en phase questionnement guidé. "
+            "Pose UNIQUEMENT la prochaine question (Q1 domaine, Q2 intention ou Q3 problème selon l'historique). "
+            "Ne présente aucun cas, ne propose aucune liste de cas."
+        )
     template = Template(RAG_PROMPT)
     return template.render(
         query=query or "",
-        hint=hint or "",
+        hint=phase_hint,
         conversation_history=conversation_history or "",
-        documents=documents or [],
+        documents=docs,
     )
 
 
@@ -554,6 +706,10 @@ def _resolve_detail_selection(
     msg = message.strip().lower()
     n = len(last_suggested_cases)
 
+    # Un seul cas proposé : « détaille » sans numéro = ce cas-là
+    if n == 1:
+        return 0
+
     # Résolution par numéro : index 0-based (point 1 -> 0, point 2 -> 1, etc.)
     # Priorité aux formes explicites "point N" pour éviter toute ambiguïté
     point_num = re.search(r"point\s*(\d+)", msg, re.IGNORECASE)
@@ -689,10 +845,56 @@ def _format_conversation_history(history: list[dict], max_messages: int = 20) ->
     return "\n".join(lines)
 
 
+def _get_domaine_code_from_history(history: list[dict]) -> str | None:
+    """
+    Retourne le code domaine (ex. ressources_humaines) si l'utilisateur a déjà
+    choisi un domaine (réponse Q1 = nombre 1 à 14). Cherche la première réponse
+    utilisateur après le welcome.
+    """
+    for m in history:
+        if (m.get("role") or "").strip().lower() != "user":
+            continue
+        content = (m.get("content") or "").strip()
+        # Réponse domaine : un nombre 1-14 seul ou en début
+        num_match = re.search(r"^\s*(\d{1,2})\s*$|^\s*(\d{1,2})\s*[\.\)]", content)
+        if num_match:
+            raw = (num_match.group(1) or num_match.group(2) or "").strip()
+            if raw:
+                try:
+                    choix = int(raw)
+                    if 1 <= choix <= 14:
+                        return CHOIX_Q1_TO_DOMAINE_CODE.get(choix)
+                except ValueError:
+                    pass
+    return None
+
+
 def _get_rag_hint(history: list[dict]) -> str:
     if len(history) >= 4:
         return "Important : c'est au moins la 3e demande de l'utilisateur. Tente de répondre avec les extraits et les informations déjà fournies ; ne pose plus de questions de clarification."
+    # Q1.5 : injecter la liste des secteurs si l'utilisateur vient de choisir un domaine qui en a
+    if len(history) >= 2:
+        domaine_code = _get_domaine_code_from_history(history)
+        if domaine_code:
+            choices = get_q15_choices(domaine_code)
+            if choices:
+                secteurs_list = ", ".join(choices)
+                return (
+                    f"Pour la question Q1.5 (secteur), le backend fournit la liste suivante. "
+                    f"Propose UNIQUEMENT ces choix (sous forme de liste numérotée ou à puces) : {secteurs_list}. "
+                    f"Pose la question secteur avec EXACTEMENT la formulation prévue, puis propose ces choix."
+                )
     return ""
+
+
+def _should_inject_rag_documents(history: list[dict]) -> bool:
+    """
+    True seulement quand le questionnement guidé (Q1 domaine, Q2 intention, Q3 problème)
+    est suffisamment avancé pour présenter des cas. Sinon on envoie un prompt sans
+    extraits pour forcer l'agent à poser la prochaine question (Q1, Q2 ou Q3).
+    """
+    # Au moins 6 messages ≈ welcome + user (domaine) + asst (Q2) + user (intention) + asst (Q3) + user (problème)
+    return len(history) >= 6
 
 
 def get_rag_prompt_and_sources(
@@ -744,21 +946,17 @@ def get_rag_prompt_and_sources(
 
     hint = _get_rag_hint(history)
     conversation_history = _format_conversation_history(history)
-    pipeline = build_rag_prompt_only_pipeline()
-    result = pipeline.run(
-        {
-            "embedder": {"text": question},
-            "prompt_builder": {"query": question, "hint": hint, "conversation_history": conversation_history},
-        }
-    )
-    docs = result.get("retriever", {}).get("documents") or []
-    # Liste plate : même ordre que pour l'affichage (Cas 1 = docs[0], etc.)
-    if docs and isinstance(docs[0], list):
-        docs = [d for sub in docs for d in sub]
+    docs = []
+    if _should_inject_rag_documents(history):
+        # Retrieval uniquement quand le questionnement (Q1, Q2, Q3) est suffisant
+        retrieval_pipeline = build_rag_retrieval_only_pipeline()
+        result = retrieval_pipeline.run({"embedder": {"text": question}})
+        docs = result.get("retriever", {}).get("documents") or []
+        if docs and isinstance(docs[0], list):
+            docs = [d for sub in docs for d in sub]
     sources = [d.content[:400] + "..." if len(d.content) > 400 else d.content for d in docs]
     suggested_case_ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
     full_contents = [d.content for d in docs]
-    # Prompt construit à partir des MÊMES docs → ordre identique à la liste affichée
     prompt_text = _build_rag_prompt_from_docs(question, hint, conversation_history, docs)
     return (prompt_text or "Aucun contexte."), sources, suggested_case_ids, full_contents
 
@@ -877,18 +1075,19 @@ def query_rag_haystack(
         a, s, i, f = detail_result
         return a, s, i, f, None, None, None
 
-    # 4) Flux RAG normal (liste de cas) : retrieval → prompt construit depuis les MÊMES docs → generator
+    # 4) Flux RAG normal : retrieval seulement après questionnement (Q1, Q2, Q3) ; sinon prompt sans cas
     hint = _get_rag_hint(history)
     conversation_history = _format_conversation_history(history)
-    retrieval_pipeline = build_rag_retrieval_only_pipeline()
-    result = retrieval_pipeline.run({"embedder": {"text": question}})
-    docs = result.get("retriever", {}).get("documents") or []
-    if docs and isinstance(docs[0], list):
-        docs = [d for sub in docs for d in sub]
+    docs = []
+    if _should_inject_rag_documents(history):
+        retrieval_pipeline = build_rag_retrieval_only_pipeline()
+        result = retrieval_pipeline.run({"embedder": {"text": question}})
+        docs = result.get("retriever", {}).get("documents") or []
+        if docs and isinstance(docs[0], list):
+            docs = [d for sub in docs for d in sub]
     sources = [d.content[:400] + "..." if len(d.content) > 400 else d.content for d in docs]
     suggested_case_ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
     full_contents = [d.content for d in docs]
-    # Prompt construit à partir des MÊMES docs → ordre Cas 1, 2, 3 = liste affichée
     prompt_text = _build_rag_prompt_from_docs(question, hint, conversation_history, docs)
     print("[LLM PROMPT (RAG)]", "-" * 40)
     print(prompt_text)

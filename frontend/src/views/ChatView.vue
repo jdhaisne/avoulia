@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted } from 'vue'
 import type { ChatMessage } from '@/api/chat'
-import { sendMessageStream } from '@/api/chat'
+import { sendMessageStream, getWelcomeMessage } from '@/api/chat'
 import microsoftLogo from '@/assets/microsoft-logo.svg'
 
 const messages = ref<ChatMessage[]>([])
@@ -18,7 +18,12 @@ function scrollToBottom() {
   })
 }
 
-onMounted(() => {
+onMounted(async () => {
+  if (messages.value.length === 0) {
+    const welcome = await getWelcomeMessage()
+    messages.value = [{ role: 'assistant', content: welcome }]
+    nextTick(() => scrollToBottom())
+  }
   nextTick(() => chatInputRef.value?.focus())
 })
 

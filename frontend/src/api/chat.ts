@@ -1,5 +1,25 @@
 const API_BASE = import.meta.env.VITE_API_URL ?? '/api/v1'
 
+/** Message d'accueil affiché au chargement du chat (fallback si l'API échoue). */
+export const WELCOME_MESSAGE_FALLBACK =
+  "Bonjour, je vais vous aider à identifier des cas d'usage concrets de l'IA adaptés à votre organisation. Pour commencer, je vais vous poser quelques questions simples afin de cibler précisément votre priorité."
+
+export interface WelcomeResponse {
+  message: string
+}
+
+export async function getWelcomeMessage(): Promise<string> {
+  try {
+    const url = `${API_BASE}/chat/welcome`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('Impossible de charger le message d\'accueil')
+    const data: WelcomeResponse = await res.json()
+    return data.message ?? WELCOME_MESSAGE_FALLBACK
+  } catch {
+    return WELCOME_MESSAGE_FALLBACK
+  }
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
