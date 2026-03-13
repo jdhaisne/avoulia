@@ -39,8 +39,11 @@ class Settings(BaseSettings):
     # Azure OpenAI / Azure AI Foundry — chargé depuis backend/.env
     # AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT (obligatoires pour Foundry)
     azure_openai_api_key: str = ""
+    azure_openai_api_key_chat: str = ""
     azure_openai_endpoint: str = ""
-    azure_openai_api_version: str = "2025-04-01-preview"
+    azure_openai_endpoint_chat: str = ""
+    azure_openai_api_version: str = ""
+    azure_openai_api_version_chat: str = ""
     # Chat Foundry : gpt-5-chat. Embedding : text-embedding-3-small
     azure_openai_chat_deployment: str = ""
     azure_openai_embedding_deployment: str = ""
@@ -65,6 +68,9 @@ class Settings(BaseSettings):
     def azure_endpoint_normalized(self) -> str:
         return _normalize_azure_endpoint(self.azure_openai_endpoint)
 
+    @property
+    def azure_endpoint_normalized_chat(self) -> str:
+        return _normalize_azure_endpoint(self.azure_openai_endpoint_chat)
     @property
     def azure_chat_deployment(self) -> str:
         """Nom du déploiement chat : AZURE_OPENAI_CHAT_DEPLOYMENT prioritaire, sinon AZURE_OPENAI_DEPLOYMENT_NAME."""

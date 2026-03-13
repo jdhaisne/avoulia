@@ -33,6 +33,14 @@ class ChatRequest(BaseModel):
         default=None,
         description="Id du cas concerné par l'action en attente (renvoyer avec pending_action).",
     )
+    selected_domain_code: str | None = Field(
+        default=None,
+        description="Domaine choisi en Q1 (stocké après la réponse, à renvoyer pour réutilisation).",
+    )
+    selected_sector: str | None = Field(
+        default=None,
+        description="Secteur choisi en Q1.5 (stocké après la réponse, à renvoyer pour réutilisation).",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -51,6 +59,14 @@ class ChatResponse(BaseModel):
     )
     pending_use_case_id: str | None = Field(default=None, description="Id du cas proposé pour le détail.")
     pending_case_index: int | None = Field(default=None, description="Numéro 1-based du cas proposé pour le détail.")
+    selected_domain_code: str | None = Field(
+        default=None,
+        description="Domaine choisi en Q1. À stocker et renvoyer dans la prochaine requête (selected_domain_code).",
+    )
+    selected_sector: str | None = Field(
+        default=None,
+        description="Secteur choisi en Q1.5. À stocker et renvoyer dans la prochaine requête (selected_sector).",
+    )
 
 
 class IngestResponse(BaseModel):

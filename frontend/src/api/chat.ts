@@ -25,9 +25,21 @@ export interface ChatMessage {
   content: string
 }
 
+/** Un cas suggéré (id + contenu), à renvoyer dans last_suggested_cases pour le détail. */
+export interface SuggestedCase {
+  id: string
+  content: string
+}
+
 export interface ChatRequest {
   message: string
   history: ChatMessage[]
+  /** Liste des cas proposés au tour précédent (pour « détaille le 2 » / « ok vas-y »). */
+  last_suggested_cases?: SuggestedCase[] | null
+  pending_action?: string | null
+  pending_use_case_id?: string | null
+  selected_domain_code?: string | null
+  selected_sector?: string | null
 }
 
 export interface ChatResponse {
@@ -49,9 +61,21 @@ export async function sendMessage(request: ChatRequest): Promise<ChatResponse> {
   return res.json()
 }
 
+/** Payload envoyé à la fin du stream (data: { done: true, ... }). */
+export interface StreamDonePayload {
+  sources: string[]
+  suggested_cases?: SuggestedCase[]
+  suggested_case_ids?: string[]
+  selected_domain_code?: string | null
+  selected_sector?: string | null
+  pending_action?: string | null
+  pending_use_case_id?: string | null
+  pending_case_index?: number | null
+}
+
 export interface StreamCallbacks {
   onToken: (token: string) => void
-  onDone: (sources: string[]) => void
+  onDone: (payload: StreamDonePayload) => void
   onError: (message: string) => void
 }
 
@@ -89,14 +113,35 @@ export async function sendMessageStream(
           const raw = line.slice(6).trim()
           if (!raw) continue
           try {
-            const data = JSON.parse(raw) as { t?: string; done?: boolean; sources?: string[]; error?: string }
+            const data = JSON.parse(raw) as {
+              t?: string
+              done?: boolean
+              sources?: string[]
+              suggested_cases?: SuggestedCase[]
+              suggested_case_ids?: string[]
+              selected_domain_code?: string | null
+              selected_sector?: string | null
+              pending_action?: string | null
+              pending_use_case_id?: string | null
+              pending_case_index?: number | null
+              error?: string
+            }
             if (data.error) {
               callbacks.onError(data.error)
               return
             }
             if (data.t) callbacks.onToken(data.t)
             if (data.done === true) {
-              callbacks.onDone(data.sources ?? [])
+              callbacks.onDone({
+                sources: data.sources ?? [],
+                suggested_cases: data.suggested_cases,
+                suggested_case_ids: data.suggested_case_ids,
+                selected_domain_code: data.selected_domain_code ?? null,
+                selected_sector: data.selected_sector ?? null,
+                pending_action: data.pending_action ?? null,
+                pending_use_case_id: data.pending_use_case_id ?? null,
+                pending_case_index: data.pending_case_index ?? null,
+              })
               return
             }
           } catch {
@@ -107,13 +152,36 @@ export async function sendMessageStream(
     }
     if (buffer.startsWith('data: ')) {
       try {
-        const data = JSON.parse(buffer.slice(6).trim()) as { done?: boolean; sources?: string[] }
-        if (data.done === true) callbacks.onDone(data.sources ?? [])
+        const data = JSON.parse(buffer.slice(6).trim()) as {
+          done?: boolean
+          sources?: string[]
+          suggested_cases?: SuggestedCase[]
+          suggested_case_ids?: string[]
+          selected_domain_code?: string | null
+          selected_sector?: string | null
+          pending_action?: string | null
+          pending_use_case_id?: string | null
+          pending_case_index?: number | null
+        }
+        if (data.done === true) {
+          callbacks.onDone({
+            sources: data.sources ?? [],
+            suggested_cases: data.suggested_cases,
+            suggested_case_ids: data.suggested_case_ids,
+            selected_domain_code: data.selected_domain_code ?? null,
+            selected_sector: data.selected_sector ?? null,
+            pending_action: data.pending_action ?? null,
+            pending_use_case_id: data.pending_use_case_id ?? null,
+            pending_case_index: data.pending_case_index ?? null,
+          })
+        } else {
+          callbacks.onDone({ sources: [] })
+        }
       } catch {
-        callbacks.onDone([])
+        callbacks.onDone({ sources: [] })
       }
     } else {
-      callbacks.onDone([])
+      callbacks.onDone({ sources: [] })
     }
   } catch (e) {
     callbacks.onError(e instanceof Error ? e.message : 'Erreur stream')

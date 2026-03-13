@@ -51,12 +51,16 @@ def chat(request: ChatRequest):
                 pending_action,
                 pending_use_case_id,
                 pending_case_index,
+                selected_domain_code,
+                selected_sector,
             ) = query_rag_haystack(
                 request.message,
                 history,
                 last_suggested_cases=last,
                 pending_action=request.pending_action,
                 pending_use_case_id=request.pending_use_case_id,
+                selected_domain_code=request.selected_domain_code,
+                selected_sector=request.selected_sector,
             )
             suggested_cases = _build_suggested_cases(suggested_case_ids, full_contents) if full_contents else None
             return ChatResponse(
@@ -67,6 +71,8 @@ def chat(request: ChatRequest):
                 pending_action=pending_action,
                 pending_use_case_id=pending_use_case_id,
                 pending_case_index=pending_case_index,
+                selected_domain_code=selected_domain_code,
+                selected_sector=selected_sector,
             )
         answer = chat_simple(request.message, history)
         return ChatResponse(answer=answer, sources=[])
@@ -80,12 +86,21 @@ def _stream_chat(request: ChatRequest):
     try:
         if settings.use_rag:
             last = _last_suggested_cases_to_dicts(request)
-            prompt_text, sources, suggested_case_ids, full_contents = get_rag_prompt_and_sources(
+            (
+                prompt_text,
+                sources,
+                suggested_case_ids,
+                full_contents,
+                selected_domain_code,
+                selected_sector,
+            ) = get_rag_prompt_and_sources(
                 request.message,
                 history,
                 last_suggested_cases=last,
                 pending_action=request.pending_action,
                 pending_use_case_id=request.pending_use_case_id,
+                selected_domain_code=request.selected_domain_code,
+                selected_sector=request.selected_sector,
             )
             for chunk in stream_prompt(prompt_text):
                 yield _sse_line({"t": chunk})
@@ -95,6 +110,8 @@ def _stream_chat(request: ChatRequest):
                 "sources": sources,
                 "suggested_case_ids": suggested_case_ids,
                 "suggested_cases": [{"id": c.id, "content": c.content} for c in suggested_cases],
+                "selected_domain_code": selected_domain_code,
+                "selected_sector": selected_sector,
             }
             yield _sse_line(done_payload)
         else:

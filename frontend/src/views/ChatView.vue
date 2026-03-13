@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted } from 'vue'
-import type { ChatMessage } from '@/api/chat'
+import type { ChatMessage, SuggestedCase } from '@/api/chat'
 import { sendMessageStream, getWelcomeMessage } from '@/api/chat'
 import microsoftLogo from '@/assets/microsoft-logo.svg'
 
@@ -8,9 +8,15 @@ const messages = ref<ChatMessage[]>([])
 const input = ref('')
 const loading = ref(false)
 const error = ref<string | null>(null)
-const sources = ref<string[]>([])
 const messagesEnd = ref<HTMLDivElement | null>(null)
 const chatInputRef = ref<HTMLInputElement | null>(null)
+
+// État renvoyé par le backend à chaque réponse, pour la requête suivante (détail « le 2 », ok/vas-y, domaine/secteur)
+const lastSuggestedCases = ref<SuggestedCase[] | null>(null)
+const selectedDomainCode = ref<string | null>(null)
+const selectedSector = ref<string | null>(null)
+const pendingAction = ref<string | null>(null)
+const pendingUseCaseId = ref<string | null>(null)
 
 function scrollToBottom() {
   nextTick(() => {
@@ -32,7 +38,6 @@ async function submit() {
   if (!text || loading.value) return
   input.value = ''
   error.value = null
-  sources.value = []
   const userMessage: ChatMessage = { role: 'user', content: text }
   messages.value = [...messages.value, userMessage]
   messages.value = [...messages.value, { role: 'assistant', content: '' }]
@@ -44,6 +49,11 @@ async function submit() {
       {
         message: text,
         history: messages.value.slice(0, -2),
+        last_suggested_cases: lastSuggestedCases.value ?? undefined,
+        pending_action: pendingAction.value ?? undefined,
+        pending_use_case_id: pendingUseCaseId.value ?? undefined,
+        selected_domain_code: selectedDomainCode.value ?? undefined,
+        selected_sector: selectedSector.value ?? undefined,
       },
       {
         onToken(token) {
@@ -57,8 +67,13 @@ async function submit() {
             nextTick(() => scrollToBottom())
           }
         },
-        onDone(s) {
-          sources.value = s
+        onDone(payload) {
+          // Stocker les cas suggérés et le contexte pour la prochaine requête (détail « le 2 », ok, domaine/secteur)
+          lastSuggestedCases.value = payload.suggested_cases ?? null
+          if (payload.selected_domain_code !== undefined) selectedDomainCode.value = payload.selected_domain_code
+          if (payload.selected_sector !== undefined) selectedSector.value = payload.selected_sector
+          if (payload.pending_action !== undefined) pendingAction.value = payload.pending_action
+          if (payload.pending_use_case_id !== undefined) pendingUseCaseId.value = payload.pending_use_case_id
           loading.value = false
           nextTick(() => {
             scrollToBottom()
@@ -130,12 +145,6 @@ async function submit() {
         </div>
 
         <div v-if="error" class="error-banner">{{ error }}</div>
-        <div v-if="sources.length" class="sources">
-          <strong>Sources :</strong>
-          <ul>
-            <li v-for="(s, i) in sources" :key="i" class="source-excerpt">{{ s }}</li>
-          </ul>
-        </div>
 
         <div v-if="loading" class="typing-line typing-above-input">Réflexion…</div>
 
@@ -322,24 +331,6 @@ async function submit() {
   border-radius: var(--radius-sm);
   margin-top: 0.5rem;
   border: 1px solid rgba(207, 34, 46, 0.2);
-}
-
-.sources {
-  padding: 0.5rem 0;
-  font-size: 0.8rem;
-  color: var(--color-text-muted);
-  max-height: 100px;
-  overflow-y: auto;
-}
-
-.sources ul {
-  margin: 0.25rem 0 0 0;
-  padding-left: 1.25rem;
-}
-
-.source-excerpt {
-  margin-bottom: 0.25rem;
-  opacity: 0.95;
 }
 
 .input-row {

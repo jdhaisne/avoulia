@@ -26,7 +26,9 @@ app.include_router(chat.router, prefix=settings.api_prefix)
 def log_config():
     """Affiche l'endpoint et le mode RAG au démarrage."""
     ep = settings.azure_endpoint_normalized or "(OpenAI direct)"
+    ep_chat = settings.azure_endpoint_normalized_chat or "(OpenAI direct)"
     print(f"[Config] Endpoint: {ep}")
+    print(f"[Config] Chat Endpoint: {ep_chat}")
     print(f"[Config] Chat deployment: {settings.azure_chat_deployment} (si 404 DeploymentNotFound, vérifier ce nom dans le portail Foundry)")
     print(f"[Config] USE_RAG={settings.use_rag}")
 

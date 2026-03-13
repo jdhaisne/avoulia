@@ -87,14 +87,6 @@ def chat_simple(message: str, history: list[dict]) -> str:
     messages: list[BaseMessage] = [SystemMessage(content=system)]
     messages.extend(_history_to_messages(history))
     messages.append(HumanMessage(content=message))
-    print("[LLM PROMPT (chat simple)]", "-" * 40)
-    for i, m in enumerate(messages):
-        role = getattr(m, "type", type(m).__name__)
-        content = getattr(m, "content", str(m))[:2000]
-        if len(getattr(m, "content", str(m))) > 2000:
-            content += "..."
-        print(f"  [{i}] {role}: {content}")
-    print("-" * 40)
     response = llm.invoke(messages)
     return response.content if hasattr(response, "content") else str(response)
 
@@ -106,14 +98,6 @@ def chat_simple_stream(message: str, history: list[dict]):
     messages: list[BaseMessage] = [SystemMessage(content=system)]
     messages.extend(_history_to_messages(history))
     messages.append(HumanMessage(content=message))
-    print("[LLM PROMPT (chat simple stream)]", "-" * 40)
-    for i, m in enumerate(messages):
-        role = getattr(m, "type", type(m).__name__)
-        content = getattr(m, "content", str(m))[:2000]
-        if len(getattr(m, "content", str(m))) > 2000:
-            content += "..."
-        print(f"  [{i}] {role}: {content}")
-    print("-" * 40)
     for chunk in llm.stream(messages):
         if hasattr(chunk, "content") and chunk.content:
             yield chunk.content
@@ -121,9 +105,6 @@ def chat_simple_stream(message: str, history: list[dict]):
 
 def stream_prompt(prompt_text: str):
     """Génère des chunks à partir d'un prompt unique (pour RAG en streaming)."""
-    print("[LLM PROMPT]", "-" * 40)
-    print(prompt_text)
-    print("-" * 40)
     llm = get_llm()
     for chunk in llm.stream([HumanMessage(content=prompt_text)]):
         if hasattr(chunk, "content") and chunk.content:
