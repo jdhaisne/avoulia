@@ -149,6 +149,17 @@ def _get_domaine_label(domaine_code: str) -> str:
 # Noms de colonnes possibles dans l'index (XLSX) pour domaine et intention (selon en-têtes du fichier).
 DOMAINE_META_KEYS = ("domaine_label", "domaine_label_fr", "Domaine", "domaine")
 INTENTION_META_KEYS = ("intention", "Intention", "objectif", "Objectif")
+# Clés meta pour les triggers (exemples de situations) Q3 — colonnes XLSX possibles.
+TRIGGER_META_KEYS = ("trigger", "Trigger", "situation", "Situation", "situation_trigger", "exemple_situation", "declencheurs_typiques")
+
+
+def _get_trigger_from_meta(meta: dict) -> str:
+    """Extrait la valeur trigger/situation depuis les meta."""
+    for key in TRIGGER_META_KEYS:
+        val = (meta.get(key) or "").strip()
+        if val:
+            return val
+    return ""
 
 
 def _doc_matches_domain(doc, label: str, domaine_code: str) -> bool:
@@ -225,12 +236,76 @@ def _get_intentions_from_store(domaine_code: str) -> list[str]:
     return sorted(out)
 
 
+def _get_triggers_from_store(domaine_code: str, intention: str | None = None) -> list[str]:
+    """
+    Récupère les triggers (exemples de situations) distincts depuis Chroma pour ce domaine,
+    optionnellement filtrés par intention. Même logique que _get_intentions_from_store pour les docs.
+    """
+    label = _get_domaine_label(domaine_code) if domaine_code else None
+    docs: list = []
+
+    try:
+        store = get_document_store()
+        for field in ("meta.domaine_label", "meta.domaine", "meta.Domaine"):
+            try:
+                if label:
+                    docs = store.filter_documents(
+                        filters={"field": field, "operator": "==", "value": label}
+                    )
+                if not docs and domaine_code:
+                    docs = store.filter_documents(
+                        filters={"field": field, "operator": "==", "value": domaine_code}
+                    )
+                if docs:
+                    break
+            except Exception:
+                continue
+        if not docs and (label or domaine_code):
+            query = label or domaine_code.replace("_", " ")
+            try:
+                all_candidates = _retrieve_docs(query, top_k=150)
+                if all_candidates and isinstance(all_candidates[0], list):
+                    all_candidates = [d for sub in all_candidates for d in sub]
+            except Exception:
+                all_candidates = []
+            for d in all_candidates:
+                if _doc_matches_domain(d, label, domaine_code):
+                    docs.append(d)
+    except Exception:
+        pass
+
+    if intention:
+        intention_norm = intention.strip().lower()
+        filtered = []
+        for d in docs:
+            meta = getattr(d, "meta", None) or {}
+            doc_int = _get_intention_from_meta(meta)
+            if doc_int and doc_int.strip().lower() == intention_norm:
+                filtered.append(d)
+        docs = filtered if filtered else docs
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for d in docs:
+        meta = getattr(d, "meta", None) or {}
+        trigger = _get_trigger_from_meta(meta)
+        if trigger and trigger not in seen:
+            seen.add(trigger)
+            out.append(trigger)
+    return sorted(out)
+
+
 def get_q2_choices(domaine_code: str) -> list[str]:
     """Retourne la liste des intentions (objectifs) pour Q2 pour ce domaine. Constante puis fallback Chroma."""
     prefill = INTENTIONS_PAR_DOMAINE.get(domaine_code, [])
     if prefill:
         return list(prefill)
     return _get_intentions_from_store(domaine_code)
+
+
+def get_q3_triggers(domaine_code: str, intention: str | None = None) -> list[str]:
+    """Retourne la liste des triggers (exemples de situations) pour Q3 pour ce domaine, optionnellement pour cette intention."""
+    return _get_triggers_from_store(domaine_code, intention)
 
 
 def _secret(key: str) -> Secret:
@@ -316,6 +391,8 @@ def _get_generator():
         api_key=_secret(s.openai_api_key),
         model=s.openai_chat_model,
     )
+
+    q3_triggers_affichage = _get_q3_triggers_affichage(history, domaine_code)
 
 
 # Prompt unique RAG : parcours guidé (Q1 → Q1.5 conditionnel → Q2 → Q2.5 conditionnel → Q3 → Phase 2).
@@ -487,6 +564,8 @@ Règles :
 -------------------------------------
 Q3 — Problème concret (texte libre guidé)
 -------------------------------------
+  exemples fournis par le backend :
+{{ q3_triggers_affichage }}
 
 Si le backend fournit une liste d'exemples de situations
 (triggers), tu poses EXACTEMENT :
@@ -497,7 +576,7 @@ rencontrez actuellement ?"
 "Voici quelques situations fréquentes dans votre cas
 pour vous aider à formuler :"
 
-Tu affiches les exemples fournis par le backend sous
+Tu affiches les exemples fournis par le backend reformulés en phrase courtes et en français sous
 forme de liste simple (tirets), par exemple :
   - marge en baisse sans explication claire
   - stocks d'invendus en fin de saison
@@ -511,6 +590,7 @@ Règles :
 - L'utilisateur répond TOUJOURS en texte libre.
 - Les exemples sont une aide à la formulation, pas des
   choix à sélectionner.
+- Les exemples sont limités à 6 exemples.
 - Tu ne proposes AUCUN mécanisme de coche ou de clic.
 - Tu ne reformules jamais les exemples fournis.
 - Tu ne changes jamais le domaine, l'intention ou le
@@ -520,6 +600,9 @@ Règles :
 - Si le backend ne fournit pas d'exemples (pool trop
   petit), tu poses la question sans exemples :
   "Quel problème concret rencontrez-vous actuellement ?"
+
+
+
 
 -------------------------------------
 PHASE 1 BIS — FALLBACK INCOHÉRENCE DOMAINE
@@ -657,10 +740,11 @@ def _build_rag_prompt_from_docs(
     history: list[dict],
     secteur_choices_affichage: str = "",
     intention_choices_affichage: str = "",
+    q3_triggers_affichage: str = "",
 ) -> str:
     """
     Construit le prompt RAG avec le prompt unique. Les listes dynamiques (secteurs Q1.5,
-    intentions Q2) sont injectées dans le hint selon l'étape du parcours.
+    intentions Q2, triggers Q3) sont injectées dans le hint selon l'étape du parcours.
     """
     docs = documents or []
     history_list = history or []
@@ -673,7 +757,7 @@ def _build_rag_prompt_from_docs(
             "Ne présente aucun cas, ne propose aucune liste de cas."
         )
 
-    # Injecter les listes fournies par le backend pour Q1.5 et Q2
+    # Injecter les listes fournies par le backend pour Q1.5, Q2 et Q3
     domaine_code = _get_domaine_code_from_history(history_list)
     num_user_messages = sum(1 for m in history_list if (m.get("role") or "").strip().lower() == "user")
     q1_5_choices = get_q15_choices(domaine_code) if domaine_code else None
@@ -690,6 +774,12 @@ def _build_rag_prompt_from_docs(
                 "Liste des intentions à proposer par le backend pour Q2 (affiche cette liste telle quelle) :\n"
                 + intention_choices_affichage
             )
+    # Q3 triggers (texte libre) : injecter quand on a au moins domaine + intention (>=2 réponses user)
+    if domaine_code and num_user_messages >= 2 and q3_triggers_affichage:
+        phase_hint = (phase_hint + "\n\n" if phase_hint else "") + (
+            "exemples fournis par le backend :\n"
+            + q3_triggers_affichage
+        )
 
     template = Template(RAG_PROMPT)
     return template.render(
@@ -697,6 +787,7 @@ def _build_rag_prompt_from_docs(
         hint=phase_hint,
         conversation_history=conversation_history or "",
         documents=docs,
+        q3_triggers_affichage=q3_triggers_affichage or "",
     )
 
 
@@ -1163,6 +1254,35 @@ def _parse_sector_from_message(text: str, choices: list[str]) -> str | None:
     return None
 
 
+def _parse_intention_from_message(text: str, choices: list[str]) -> str | None:
+    """Si text correspond à un choix d'intention (numéro 1..N ou libellé), retourne le libellé, sinon None."""
+    if not choices or not (text or "").strip():
+        return None
+    text = (text or "").strip()
+    try:
+        n = int(text)
+        if 1 <= n <= len(choices):
+            return choices[n - 1]
+    except (ValueError, TypeError):
+        pass
+    num_match = re.match(r"^\s*(\d+)\s*([\.\)\s,]|$)", text)
+    if num_match:
+        try:
+            n = int(num_match.group(1))
+            if 1 <= n <= len(choices):
+                return choices[n - 1]
+        except (ValueError, TypeError):
+            pass
+    text_norm = " ".join(text.lower().split())
+    for c in choices:
+        if not c:
+            continue
+        c_norm = " ".join(c.lower().split())
+        if text_norm == c_norm or c_norm in text_norm or text_norm in c_norm:
+            return c
+    return None
+
+
 def _get_user_replies_ordered(history: list[dict], current_message: str | None = None) -> list[str]:
     """Retourne la liste des réponses utilisateur dans l'ordre (contenu uniquement). current_message est ajouté en dernier si fourni (même si identique au précédent, c'est un tour de parole différent)."""
     replies = []
@@ -1178,6 +1298,28 @@ def _get_user_replies_ordered(history: list[dict], current_message: str | None =
         if msg:
             replies.append(msg)
     return replies
+
+
+def _get_intention_from_history(history: list[dict], current_message: str | None = None) -> str | None:
+    """
+    Retourne l'intention (libellé) choisie en Q2 par l'utilisateur, ou None.
+    1re réponse user = domaine ; 2e = secteur (si Q1.5) ; 2e ou 3e = intention (Q2).
+    """
+    replies = _get_user_replies_ordered(history, current_message)
+    domaine_code = _get_domaine_code_from_history(
+        history + ([{"role": "user", "content": current_message}] if current_message else [])
+    )
+    if not domaine_code:
+        return None
+    choices = get_q2_choices(domaine_code)
+    if not choices:
+        return None
+    q15 = get_q15_choices(domaine_code)
+    if q15 and len(replies) >= 3:
+        return _parse_intention_from_message(replies[2], choices)
+    if len(replies) >= 2:
+        return _parse_intention_from_message(replies[1], choices)
+    return None
 
 
 def _get_sector_from_history(history: list[dict], current_message: str | None = None) -> str | None:
@@ -1244,6 +1386,30 @@ def _get_intention_choices_affichage(history: list[dict], domaine_code: str | No
     if not choices:
         return ""
     return "\n".join(f"{i}. {s}" for i, s in enumerate(choices, start=1))
+
+
+Q3_TRIGGERS_DISPLAY_LIMIT = 12
+
+
+def _get_q3_triggers_affichage(history: list[dict], domaine_code: str | None = None) -> str:
+    """
+    Retourne la liste des triggers (exemples de situations) pour Q3, formatée pour affichage (tirets).
+    Utilisée quand le parcours est à l'étape Q3 (domaine + intention déjà choisis). Les triggers
+    viennent du pool Chroma filtré par domaine et intention.
+    """
+    if domaine_code is None:
+        domaine_code = _get_domaine_code_from_history(history)
+    if not domaine_code:
+        return ""
+    replies = _get_user_replies_ordered(history)
+    if len(replies) < 2:
+        return ""
+    intention = _get_intention_from_history(history)
+    triggers = get_q3_triggers(domaine_code, intention)
+    if not triggers:
+        return ""
+    limited = triggers[:Q3_TRIGGERS_DISPLAY_LIMIT]
+    return "\n".join(f"- {t}" for t in limited)
 
 
 def _get_rag_hint(history: list[dict]) -> str:
@@ -1364,6 +1530,8 @@ def get_rag_prompt_and_sources(
     full_contents = [d.content for d in docs]
     secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=resolved_domain)
     intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=resolved_domain)
+    q3_triggers_affichage = _get_q3_triggers_affichage(history_with_current, domaine_code=resolved_domain)
+    print("q3_triggers_affichage:", repr(q3_triggers_affichage))
     prompt_text = _build_rag_prompt_from_docs(
         question,
         hint,
@@ -1372,6 +1540,7 @@ def get_rag_prompt_and_sources(
         history_with_current,
         secteur_choices_affichage=secteur_affichage,
         intention_choices_affichage=intention_affichage,
+        q3_triggers_affichage=q3_triggers_affichage,
     )
     print("--- PROMPT RAG (get_rag_prompt_and_sources) ---")
     print(prompt_text or "Aucun contexte.")
@@ -1516,6 +1685,8 @@ def query_rag_haystack(
     full_contents = [d.content for d in docs]
     secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=resolved_domain)
     intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=resolved_domain)
+    q3_triggers_affichage = _get_q3_triggers_affichage(history_with_current, domaine_code=resolved_domain)
+    print("q3_triggers_affichage:", repr(q3_triggers_affichage))
     prompt_text = _build_rag_prompt_from_docs(
         question,
         hint,
@@ -1524,6 +1695,7 @@ def query_rag_haystack(
         history_with_current,
         secteur_choices_affichage=secteur_affichage,
         intention_choices_affichage=intention_affichage,
+        q3_triggers_affichage=q3_triggers_affichage,
     )
     print("--- PROMPT RAG (query_rag_haystack) ---")
     print(prompt_text or "Aucun contexte.")
