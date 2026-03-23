@@ -15,6 +15,7 @@ const chatInputRef = ref<HTMLInputElement | null>(null)
 const lastSuggestedCases = ref<SuggestedCase[] | null>(null)
 const selectedDomainCode = ref<string | null>(null)
 const selectedSector = ref<string | null>(null)
+const selectedIntention = ref<string | null>(null)
 const pendingAction = ref<string | null>(null)
 const pendingUseCaseId = ref<string | null>(null)
 
@@ -54,6 +55,7 @@ async function submit() {
         pending_use_case_id: pendingUseCaseId.value ?? undefined,
         selected_domain_code: selectedDomainCode.value ?? undefined,
         selected_sector: selectedSector.value ?? undefined,
+        selected_intention: selectedIntention.value ?? undefined,
       },
       {
         onToken(token) {
@@ -70,8 +72,17 @@ async function submit() {
         onDone(payload) {
           // Stocker les cas suggérés et le contexte pour la prochaine requête (détail « le 2 », ok, domaine/secteur)
           lastSuggestedCases.value = payload.suggested_cases ?? null
+          const previousDomain = selectedDomainCode.value
+          const previousSector = selectedSector.value
           if (payload.selected_domain_code !== undefined) selectedDomainCode.value = payload.selected_domain_code
           if (payload.selected_sector !== undefined) selectedSector.value = payload.selected_sector
+          if (payload.selected_intention !== undefined) selectedIntention.value = payload.selected_intention
+          if (selectedDomainCode.value !== previousDomain) {
+            selectedSector.value = null
+            selectedIntention.value = null
+          } else if (selectedSector.value !== previousSector) {
+            selectedIntention.value = null
+          }
           if (payload.pending_action !== undefined) pendingAction.value = payload.pending_action
           if (payload.pending_use_case_id !== undefined) pendingUseCaseId.value = payload.pending_use_case_id
           loading.value = false

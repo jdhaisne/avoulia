@@ -41,6 +41,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Secteur choisi en Q1.5 (stocké après la réponse, à renvoyer pour réutilisation).",
     )
+    selected_intention: str | None = Field(
+        default=None,
+        description="Intention choisie en Q2 (code). À stocker et renvoyer pour réutilisation.",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -66,6 +70,10 @@ class ChatResponse(BaseModel):
     selected_sector: str | None = Field(
         default=None,
         description="Secteur choisi en Q1.5. À stocker et renvoyer dans la prochaine requête (selected_sector).",
+    )
+    selected_intention: str | None = Field(
+        default=None,
+        description="Intention choisie en Q2 (code). À stocker et renvoyer dans la prochaine requête (selected_intention).",
     )
 
 

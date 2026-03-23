@@ -372,11 +372,8 @@ def _get_document_embedder():
 
 def _get_generator():
     """Générateur chat Foundry (gpt-5-chat)."""
-    print("get generator")
     s = get_settings()
     if s.use_azure_openai:
-        print("use azure opEnai")
-        print(s.azure_openai_api_version_chat)
         from haystack.components.generators import AzureOpenAIGenerator
         return AzureOpenAIGenerator(
             azure_endpoint=s.azure_endpoint_normalized_chat,
@@ -384,16 +381,12 @@ def _get_generator():
             api_version=s.azure_openai_api_version_chat,
             azure_deployment=s.azure_chat_deployment,
         )
-    print("use openai")
 
     from haystack.components.generators import OpenAIGenerator
     return OpenAIGenerator(
         api_key=_secret(s.openai_api_key),
         model=s.openai_chat_model,
     )
-
-    q3_triggers_affichage = _get_q3_triggers_affichage(history, domaine_code)
-
 
 # Prompt unique RAG : parcours guidé (Q1 → Q1.5 conditionnel → Q2 → Q2.5 conditionnel → Q3 → Phase 2).
 # Les listes dynamiques (secteurs Q1.5, intentions Q2, etc.) sont injectées via le hint.
@@ -524,8 +517,13 @@ Sinon tu passes directement à Q2.
 Si déclenchée, tu poses EXACTEMENT :
 
 "Pour mieux cibler mes recommandations, pouvez-vous me
-dire dans quel secteur vous opérez ? (optionnel)"
-et fourni la liste des secteurs possibles pour un domaine donné.
+dire dans quel secteur vous opérez ? Répondez avec le numéro du choix. (optionnel)"
+et tu fournis la liste des secteurs possibles numérotée (1..N) pour le domaine donné.
+
+Règle stricte :
+- si l'utilisateur répond avec un numéro hors plage (ex: 9 alors qu'il n'y a que 5 choix),
+  cette réponse est invalide.
+- dans ce cas, tu ne passes JAMAIS à Q2 : tu répètes Q1.5 et redonnes la liste numérotée.
 
 -------------------------------------
 Q2 — Objectif principal
@@ -542,6 +540,8 @@ Règles :
 - Tu ne reformules pas les intentions.
 - Si la réponse ne correspond pas à la liste fournie, tu
   redemandes un choix valide.
+- Si l'utilisateur répond avec un numéro hors plage, tu ne passes
+  pas à Q3 : tu répètes Q2 et redonnes la liste numérotée.
 
 -------------------------------------
 Q2.5 — Précision du sujet (conditionnel)
@@ -644,6 +644,32 @@ Tu présentes :
 - Aucun mélange
 
 -------------------------------------
+PHASE 3 — CLOTURE
+-------------------------------------
+
+Les cas fournis sont déjà :
+- filtrés par domaine
+- filtrés par intention
+- éventuellement filtrés par micro-thème
+- éventuellement priorisés par secteur
+- sélectionnés de manière déterministe
+
+Tu ne modifies jamais cet ordre.
+Tu ne reclasses jamais.
+Tu ne scores rien.
+Tu ne supprimes rien sauf si plus de 5 cas sont fournis.
+
+Tu présentes :
+- continue a détailler les cas si demandé par l'utilisateur
+- sinon, tu termines la conversation
+- tu ne proposes jamais de nouveaux cas
+- tu ne proposes jamais de nouveaux micro-thèmes
+- tu ne proposes jamais de nouveaux secteurs
+- tu ne proposes jamais de nouveaux domaines
+- tu ne proposes jamais de nouveaux intentions
+- tu ne proposes jamais de nouveaux micro-thèmes
+
+-------------------------------------
 FORMAT OBLIGATOIRE POUR CHAQUE CAS
 -------------------------------------
 
@@ -698,6 +724,21 @@ Tu dois tenir compte de l'historique de la conversation : métier, objectifs, co
 {% if hint %}
 {{ hint }}
 {% endif %}
+{% if user_choices_summary %}
+Résumé des choix utilisateur :
+{{ user_choices_summary }}
+
+{% endif %}
+{% if identified_cases_summary %}
+Cas identifiés (3 à 5) :
+{{ identified_cases_summary }}
+
+{% endif %}
+{% if detail_prompt_context %}
+Consignes de détail à appliquer si l'utilisateur demande de détailler un cas :
+{{ detail_prompt_context }}
+
+{% endif %}
 {% if conversation_history %}
 Historique récent de la conversation (utilise-le pour garder le contexte) :
 {{ conversation_history }}
@@ -725,6 +766,7 @@ L'utilisateur a demandé à détailler un cas précis que tu avais proposé. Tu 
 - la vigilance données (data_sensitivity, guardrails_pme),
 - un premier pas faisable en 48h,
 - les prérequis simples.
+- après le détail, proposer uniquement de revenir à la liste ou de terminer, sans inventer de nouveaux services
 
 Données complètes du cas à détailler :
 {{ case_content }}
@@ -741,6 +783,9 @@ def _build_rag_prompt_from_docs(
     secteur_choices_affichage: str = "",
     intention_choices_affichage: str = "",
     q3_triggers_affichage: str = "",
+    selected_domain_code: str | None = None,
+    selected_sector: str | None = None,
+    selected_intention: str | None = None,
 ) -> str:
     """
     Construit le prompt RAG avec le prompt unique. Les listes dynamiques (secteurs Q1.5,
@@ -758,33 +803,61 @@ def _build_rag_prompt_from_docs(
         )
 
     # Injecter les listes fournies par le backend pour Q1.5, Q2 et Q3
-    domaine_code = _get_domaine_code_from_history(history_list)
-    num_user_messages = sum(1 for m in history_list if (m.get("role") or "").strip().lower() == "user")
+    domaine_code = selected_domain_code or _get_domaine_code_from_history(history_list)
     q1_5_choices = get_q15_choices(domaine_code) if domaine_code else None
 
-    if domaine_code and q1_5_choices and num_user_messages == 1 and secteur_choices_affichage:
+    if domaine_code and q1_5_choices and not selected_sector and secteur_choices_affichage:
         phase_hint = (phase_hint + "\n\n" if phase_hint else "") + (
             "Liste des secteurs à proposer par le backend pour Q1.5 (affiche cette liste telle quelle) :\n"
             + secteur_choices_affichage
         )
-    if domaine_code and intention_choices_affichage:
-        # Q2 : après Q1 (sans secteur) ou après Q1.5 (2 réponses user)
-        if not q1_5_choices or num_user_messages >= 2:
+    if domaine_code and intention_choices_affichage and not selected_intention:
+        # Q2 : sans dépendance au nombre de messages
+        # - domaines sans Q1.5: directement après Q1
+        # - domaines avec Q1.5: seulement après secteur validé
+        if not q1_5_choices or selected_sector:
             phase_hint = (phase_hint + "\n\n" if phase_hint else "") + (
                 "Liste des intentions à proposer par le backend pour Q2 (affiche cette liste telle quelle) :\n"
                 + intention_choices_affichage
             )
-    # Q3 triggers (texte libre) : injecter quand on a au moins domaine + intention (>=2 réponses user)
-    if domaine_code and num_user_messages >= 2 and q3_triggers_affichage:
+    # Q3 triggers : seulement quand domaine + intention sont validés
+    if domaine_code and selected_intention and q3_triggers_affichage:
         phase_hint = (phase_hint + "\n\n" if phase_hint else "") + (
             "exemples fournis par le backend :\n"
             + q3_triggers_affichage
         )
 
+    domain_label = _get_domaine_label(domaine_code) if domaine_code else "non sélectionné"
+    intention_label = _get_intention_label_from_code(domaine_code, selected_intention) if domaine_code else None
+    user_choices_summary = "\n".join(
+        [
+            f"- Domaine: {domain_label}",
+            f"- Secteur: {selected_sector or 'non sélectionné'}",
+            f"- Intention: {intention_label or 'non sélectionnée'}",
+        ]
+    )
+    identified_cases_summary = ""
+    if docs:
+        selected_cases = docs[:5]
+        if len(selected_cases) < 3 and len(docs) >= 3:
+            selected_cases = docs[:3]
+        lines = []
+        for i, d in enumerate(selected_cases, start=1):
+            content = (getattr(d, "content", "") or "").strip()
+            short = content[:240] + "..." if len(content) > 240 else content
+            lines.append(f"{i}. {short}")
+        identified_cases_summary = "\n".join(lines)
+    detail_prompt_context = ""
+    if _is_detail_request(query) or _has_explicit_point_number(query):
+        detail_prompt_context = DETAIL_PROMPT
+
     template = Template(RAG_PROMPT)
     return template.render(
         query=query or "",
         hint=phase_hint,
+        user_choices_summary=user_choices_summary,
+        identified_cases_summary=identified_cases_summary,
+        detail_prompt_context=detail_prompt_context,
         conversation_history=conversation_history or "",
         documents=docs,
         q3_triggers_affichage=q3_triggers_affichage or "",
@@ -852,6 +925,36 @@ def _has_explicit_point_number(message: str) -> bool:
     if re.search(r"(?:le|numero|numéro)\s*[1-5]\b", msg):
         return True
     return False
+
+
+def _extract_explicit_point_number(message: str) -> int | None:
+    """
+    Extrait un numéro explicite de cas/point (1-based) depuis le message.
+    Retourne None si aucun numéro explicite n'est présent.
+    """
+    if not message or len(message.strip()) < 2:
+        return None
+    msg = message.strip().lower()
+
+    m = re.search(r"\b(?:point|cas|numéro|numero)\s*([1-9]\d?)\b", msg, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    m = re.search(r"\ble\s+([1-9]\d?)\s*(?:er|ème|e|eme)?\b", msg, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    ord_map = {
+        "premier": 1, "1er": 1, "1ère": 1, "1ere": 1,
+        "deuxième": 2, "2ème": 2, "2eme": 2, "2e": 2,
+        "troisième": 3, "3ème": 3, "3eme": 3, "3e": 3,
+        "quatrième": 4, "4ème": 4, "4eme": 4, "4e": 4,
+        "cinquième": 5, "5ème": 5, "5eme": 5, "5e": 5,
+    }
+    for token, idx in ord_map.items():
+        if re.search(r"\b" + re.escape(token) + r"\b", msg):
+            return idx
+    return None
 
 
 def _is_affirmation(message: str) -> bool:
@@ -963,7 +1066,6 @@ def _retrieve_docs(query: str, top_k: int | None = None) -> list:
     k = top_k or s.top_k_retrieve
     store = get_document_store()
     embedder = _get_text_embedder()
-    print("embedder 4", embedder)
     retriever = ChromaEmbeddingRetriever(document_store=store, top_k=k)
     pipeline = Pipeline()
     pipeline.add_component("embedder", embedder)
@@ -985,6 +1087,13 @@ def _resolve_detail_selection(
     msg = message.strip().lower()
     n = len(last_suggested_cases)
 
+    explicit = _extract_explicit_point_number(message)
+    if explicit is not None:
+        idx = explicit - 1
+        if 0 <= idx < n:
+            return idx
+        return None
+
     # Un seul cas proposé : « détaille » sans numéro = ce cas-là
     if n == 1:
         return 0
@@ -1003,13 +1112,6 @@ def _resolve_detail_selection(
         if idx < n:
             return idx
         return None
-    simple_num = re.search(r"\b(?:le\s+)?([1-5])\s*(?:er|ème|e|eme)?\b", msg)
-    if simple_num:
-        idx = int(simple_num.group(1)) - 1
-        if idx < n:
-            return idx
-        return None
-
     # Ordinals en mots (sans " 1", " 2" etc. qui matchent dans "le 10")
     ordinals = {
         "premier": 0, "1er": 0, "1ère": 0, "1ere": 0,
@@ -1055,7 +1157,6 @@ def build_rag_retrieval_only_pipeline():
     s = get_settings()
     store = get_document_store()
     embedder = _get_text_embedder()
-    print("embedder 3", embedder)
     retriever = ChromaEmbeddingRetriever(document_store=store, top_k=s.top_k_retrieve)
     pipeline = Pipeline()
     pipeline.add_component("embedder", embedder)
@@ -1069,7 +1170,6 @@ def build_rag_prompt_only_pipeline():
     s = get_settings()
     store = get_document_store()
     embedder = _get_text_embedder()
-    print("embedder 2", embedder)
     retriever = ChromaEmbeddingRetriever(document_store=store, top_k=s.top_k_retrieve)
     prompt_builder = PromptBuilder(template=RAG_PROMPT)
     pipeline = Pipeline()
@@ -1086,7 +1186,6 @@ def build_rag_pipeline():
     s = get_settings()
     store = get_document_store()
     embedder = _get_text_embedder()
-    print("embedder", embedder)
     retriever = ChromaEmbeddingRetriever(document_store=store, top_k=s.top_k_retrieve)
     prompt_builder = PromptBuilder(template=RAG_PROMPT)
     generator = _get_generator()
@@ -1129,6 +1228,9 @@ def _build_detail_input_with_recap(
 def _run_detail_pipeline(case_content: str) -> str:
     """Génère une réponse de détail pour un seul cas (pas de retrieval)."""
     prompt_str = DETAIL_PROMPT.replace("{{ case_content }}", case_content)
+    print("--- PROMPT DETAIL (_run_detail_pipeline) ---")
+    print(prompt_str or "Aucun contexte.")
+    print("--- FIN PROMPT DETAIL ---")
     prompt_builder = PromptBuilder(template=DETAIL_PROMPT)
     generator = _get_generator()
     pipeline = Pipeline()
@@ -1169,6 +1271,7 @@ def _parse_domaine_from_message(content: str | int | None) -> str | None:
     text = str(content).strip()
     if not text:
         return None
+    text_norm = " ".join(text.lower().split())
     # 0) Chaîne = un seul entier 1-14 (ex. "3" ou front envoie 3)
     try:
         n = int(text)
@@ -1198,7 +1301,14 @@ def _parse_domaine_from_message(content: str | int | None) -> str | None:
     text_lower = text.lower()
     for choix in range(1, 15):
         label = Q1_DOMAINS_LIST[choix - 1]
-        if label and (text_lower == label.lower() or label.lower() in text_lower):
+        if not label:
+            continue
+        label_norm = " ".join(label.lower().split())
+        if text_lower == label.lower() or label.lower() in text_lower:
+            return CHOIX_Q1_TO_DOMAINE_CODE.get(choix)
+        # Tolérance pour saisies partielles (ex. "btp" -> "Construction ... BTP")
+        # On évite les très petites chaînes pour limiter les faux positifs.
+        if len(text_norm) >= 3 and text_norm in label_norm:
             return CHOIX_Q1_TO_DOMAINE_CODE.get(choix)
     return None
 
@@ -1283,6 +1393,167 @@ def _parse_intention_from_message(text: str, choices: list[str]) -> str | None:
     return None
 
 
+def _parse_intention_code_from_message(text: str, choices: list[str]) -> str | None:
+    """Retourne le code d'intention (index 1..N en string) depuis une réponse Q2, sinon None."""
+    parsed = _parse_intention_from_message(text, choices)
+    if not parsed:
+        return None
+    try:
+        return str(choices.index(parsed) + 1)
+    except ValueError:
+        return None
+
+
+def _get_intention_label_from_code(domaine_code: str, intention_code: str | None) -> str | None:
+    """Traduit un code d'intention (1..N) en libellé Q2 pour un domaine donné."""
+    if not domaine_code or not intention_code:
+        return None
+    choices = get_q2_choices(domaine_code)
+    if not choices:
+        return None
+    try:
+        idx = int(str(intention_code).strip())
+    except (ValueError, TypeError):
+        return None
+    if 1 <= idx <= len(choices):
+        return choices[idx - 1]
+    return None
+
+
+def _resolve_selection_state(
+    question: str,
+    selected_domain_code: str | None,
+    selected_sector: str | None,
+    selected_intention: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Met à jour domaine/secteur/intention à partir du message courant et de l'état client.
+    Règles:
+    - changement de domaine -> reset secteur + intention
+    - changement de secteur -> reset intention
+    - intention stockée en code (string 1..N)
+    """
+    current_domain = selected_domain_code
+    current_sector = selected_sector
+    current_intention = selected_intention
+
+    question_text = (question or "").strip()
+    parsed_domain = _parse_domaine_from_message(question)
+    # Eviter de changer de domaine sur un nombre ambigu (ex. "2" en Q2).
+    # On accepte le changement si aucun domaine n'est encore sélectionné, ou si le message
+    # est explicite (non-numérique) et correspond à un domaine.
+    is_plain_integer = bool(re.fullmatch(r"\d+", question_text))
+    if parsed_domain and parsed_domain != current_domain:
+        if current_domain is None or not is_plain_integer:
+            return parsed_domain, None, None
+
+    if not current_domain:
+        return current_domain, current_sector, current_intention
+
+    sector_choices = get_q15_choices(current_domain)
+    # Le secteur ne doit être détecté que tant qu'il n'est pas déjà choisi.
+    if sector_choices and not current_sector:
+        parsed_sector = _parse_sector_from_message(question, sector_choices)
+        if parsed_sector and parsed_sector != current_sector:
+            return current_domain, parsed_sector, None
+
+    intention_choices = get_q2_choices(current_domain)
+    if intention_choices:
+        parsed_intention_code = _parse_intention_code_from_message(question, intention_choices)
+        if parsed_intention_code:
+            current_intention = parsed_intention_code
+
+    return current_domain, current_sector, current_intention
+
+
+def _derive_selection_state_from_history(
+    history: list[dict],
+    selected_domain_code: str | None = None,
+    selected_sector: str | None = None,
+    selected_intention: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Rejoue l'identification domaine/secteur/intention sur tous les messages,
+    en se basant sur le type de question posé par l'assistant (Q1/Q1.5/Q2),
+    sans dépendre du nombre de tours.
+    """
+    def _detect_expected_step_from_assistant(text: str) -> str | None:
+        t = " ".join((text or "").lower().split())
+        if not t:
+            return None
+        if "dans quel domaine" in t or "domaine souhaitez-vous" in t:
+            return "domain"
+        if "q1.5" in t or "secteur" in t:
+            return "sector"
+        if "q2" in t or "objectif principal" in t or "intentions" in t:
+            return "intention"
+        return None
+
+    current_domain = selected_domain_code
+    current_sector = selected_sector
+    current_intention = selected_intention
+    expected_step: str | None = None
+    for msg in history:
+        role = (msg.get("role") or "").strip().lower()
+        content = str(msg.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "assistant":
+            detected = _detect_expected_step_from_assistant(content)
+            if detected:
+                expected_step = detected
+            continue
+        if role != "user":
+            continue
+
+        # Domaine explicite : toujours prioritaire. Evite de relire ce message comme secteur/intention.
+        parsed_domain = _parse_domaine_from_message(content)
+        is_plain_integer = bool(re.fullmatch(r"\d+", content))
+        if parsed_domain and parsed_domain != current_domain:
+            if current_domain is None or not is_plain_integer or expected_step == "domain":
+                current_domain = parsed_domain
+                current_sector = None
+                current_intention = None
+                expected_step = "sector" if get_q15_choices(current_domain) else "intention"
+                continue
+
+        if not current_domain:
+            # Tant qu'aucun domaine n'est validé, on ignore secteur/intention.
+            continue
+
+        if expected_step == "sector":
+            sector_choices = get_q15_choices(current_domain)
+            parsed_sector = _parse_sector_from_message(content, sector_choices) if sector_choices else None
+            if parsed_sector:
+                if parsed_sector != current_sector:
+                    current_sector = parsed_sector
+                    current_intention = None
+                expected_step = "intention"
+            continue
+
+        if expected_step == "intention":
+            intention_choices = get_q2_choices(current_domain)
+            parsed_intention_code = _parse_intention_code_from_message(content, intention_choices) if intention_choices else None
+            if parsed_intention_code:
+                current_intention = parsed_intention_code
+                expected_step = None
+            continue
+
+        # Fallback défensif (si aucun step détecté dans les messages assistant)
+        if not current_sector:
+            sector_choices = get_q15_choices(current_domain)
+            parsed_sector = _parse_sector_from_message(content, sector_choices) if sector_choices else None
+            if parsed_sector:
+                current_sector = parsed_sector
+                current_intention = None
+                continue
+        intention_choices = get_q2_choices(current_domain)
+        parsed_intention_code = _parse_intention_code_from_message(content, intention_choices) if intention_choices else None
+        if parsed_intention_code:
+            current_intention = parsed_intention_code
+    return current_domain, current_sector, current_intention
+
+
 def _get_user_replies_ordered(history: list[dict], current_message: str | None = None) -> list[str]:
     """Retourne la liste des réponses utilisateur dans l'ordre (contenu uniquement). current_message est ajouté en dernier si fourni (même si identique au précédent, c'est un tour de parole différent)."""
     replies = []
@@ -1300,58 +1571,44 @@ def _get_user_replies_ordered(history: list[dict], current_message: str | None =
     return replies
 
 
-def _get_intention_from_history(history: list[dict], current_message: str | None = None) -> str | None:
+def _get_intention_from_history(
+    history: list[dict],
+    selected_domain_code: str | None,
+    current_message: str | None = None,
+) -> str | None:
     """
-    Retourne l'intention (libellé) choisie en Q2 par l'utilisateur, ou None.
-    1re réponse user = domaine ; 2e = secteur (si Q1.5) ; 2e ou 3e = intention (Q2).
+    Retourne l'intention (libellé) détectée depuis les messages utilisateur, ou None.
+    Le domaine est fourni explicitement (selected_domain_code), sans redéduction depuis l'historique.
     """
-    replies = _get_user_replies_ordered(history, current_message)
-    domaine_code = _get_domaine_code_from_history(
-        history + ([{"role": "user", "content": current_message}] if current_message else [])
-    )
-    if not domaine_code:
+    if not selected_domain_code:
         return None
-    choices = get_q2_choices(domaine_code)
+    choices = get_q2_choices(selected_domain_code)
     if not choices:
         return None
-    q15 = get_q15_choices(domaine_code)
-    if q15 and len(replies) >= 3:
-        return _parse_intention_from_message(replies[2], choices)
-    if len(replies) >= 2:
-        return _parse_intention_from_message(replies[1], choices)
-    return None
+    history_with_current = history + ([{"role": "user", "content": current_message}] if current_message else [])
+    _, _, intention_code = _derive_selection_state_from_history(
+        history_with_current,
+        selected_domain_code=selected_domain_code,
+        selected_sector=None,
+        selected_intention=None,
+    )
+    return _get_intention_label_from_code(selected_domain_code, intention_code)
 
 
 def _get_sector_from_history(history: list[dict], current_message: str | None = None) -> str | None:
     """
     Retourne le secteur choisi en Q1.5 par l'utilisateur, ou None.
-    Utilise la position : 1re réponse user = domaine (Q1), 2e réponse user = secteur (Q1.5).
-    Un "3" en 1re position = domaine 3 (RH), un "3" en 2e position = 3e secteur de la liste.
+    Déduction basée sur le flux conversationnel (questions assistant + réponses user),
+    sans dépendre du nombre de messages.
     """
-    replies = _get_user_replies_ordered(history, current_message)
-    if len(replies) < 2:
-        return None
-    # Domaine : 1re réponse user (ou fallback sur _get_domaine_code_from_history)
-    domaine_code = _parse_domaine_from_message(replies[0])
-    if not domaine_code:
-        domaine_code = _get_domaine_code_from_history(history)
-    if not domaine_code:
-        return None
-    choices = get_q15_choices(domaine_code)
-    if not choices:
-        return None
-    # 2e réponse = secteur (Q1.5) ; numéro 1..N ou libellé
-    sector = _parse_sector_from_message(replies[1], choices)
-    if sector:
-        return sector
-    # Fallback : si la 2e réponse est un entier (ex. "3"), l'utiliser comme index même si hors plage partielle
-    try:
-        n = int((replies[1] or "").strip())
-        if 1 <= n <= len(choices):
-            return choices[n - 1]
-    except (ValueError, TypeError):
-        pass
-    return None
+    history_with_current = history + ([{"role": "user", "content": current_message}] if current_message else [])
+    _, sector, _ = _derive_selection_state_from_history(
+        history_with_current,
+        selected_domain_code=None,
+        selected_sector=None,
+        selected_intention=None,
+    )
+    return sector
 
 
 def _get_secteur_choices_affichage(history: list[dict], domaine_code: str | None = None) -> str:
@@ -1391,20 +1648,21 @@ def _get_intention_choices_affichage(history: list[dict], domaine_code: str | No
 Q3_TRIGGERS_DISPLAY_LIMIT = 12
 
 
-def _get_q3_triggers_affichage(history: list[dict], domaine_code: str | None = None) -> str:
+def _get_q3_triggers_affichage(
+    history: list[dict],
+    domaine_code: str | None = None,
+    selected_intention: str | None = None,
+) -> str:
     """
     Retourne la liste des triggers (exemples de situations) pour Q3, formatée pour affichage (tirets).
     Utilisée quand le parcours est à l'étape Q3 (domaine + intention déjà choisis). Les triggers
     viennent du pool Chroma filtré par domaine et intention.
     """
-    if domaine_code is None:
-        domaine_code = _get_domaine_code_from_history(history)
     if not domaine_code:
         return ""
-    replies = _get_user_replies_ordered(history)
-    if len(replies) < 2:
+    if not selected_intention:
         return ""
-    intention = _get_intention_from_history(history)
+    intention = _get_intention_label_from_code(domaine_code, selected_intention)
     triggers = get_q3_triggers(domaine_code, intention)
     if not triggers:
         return ""
@@ -1450,14 +1708,101 @@ def _get_rag_hint(history: list[dict]) -> str:
     return ""
 
 
-def _should_inject_rag_documents(history: list[dict]) -> bool:
+def _should_inject_rag_documents(
+    selected_domain_code: str | None,
+    selected_sector: str | None,
+    selected_intention: str | None,
+) -> bool:
     """
-    True seulement quand le questionnement guidé (Q1 domaine, Q2 intention, Q3 problème)
-    est suffisamment avancé pour présenter des cas. Sinon on envoie un prompt sans
-    extraits pour forcer l'agent à poser la prochaine question (Q1, Q2 ou Q3).
+    True uniquement quand le parcours guidé est suffisamment complété
+    pour identifier des cas:
+    - domaine validé
+    - intention validée
+    - secteur validé si Q1.5 existe pour ce domaine
     """
-    # Au moins 6 messages ≈ welcome + user (domaine) + asst (Q2) + user (intention) + asst (Q3) + user (problème)
-    return len(history) >= 6
+    if not selected_domain_code or not selected_intention:
+        return False
+    q15_choices = get_q15_choices(selected_domain_code)
+    if q15_choices and not selected_sector:
+        return False
+    return True
+
+
+def _resolve_current_selection_state(
+    history: list[dict],
+    question: str,
+    selected_domain_code: str | None,
+    selected_sector: str | None,
+    selected_intention: str | None,
+) -> tuple[list[dict], str | None, str | None, str | None]:
+    """Résout domaine/secteur/intention courants en priorisant ce qui est détecté dans l'historique."""
+    history_with_current = history + [{"role": "user", "content": question}]
+    derived_domain, derived_sector, derived_intention = _derive_selection_state_from_history(
+        history_with_current,
+        selected_domain_code=None,
+        selected_sector=None,
+        selected_intention=None,
+    )
+    current_domain = derived_domain or selected_domain_code
+    current_sector = derived_sector or selected_sector
+    current_intention = derived_intention or selected_intention
+    return history_with_current, current_domain, current_sector, current_intention
+
+
+def _retrieve_docs_for_question(question: str) -> list:
+    """Récupère les documents pertinents pour la question (avec flatten si nested list)."""
+    retrieval_pipeline = build_rag_retrieval_only_pipeline()
+    result = retrieval_pipeline.run({"embedder": {"text": question}})
+    docs = result.get("retriever", {}).get("documents") or []
+    if docs and isinstance(docs[0], list):
+        docs = [d for sub in docs for d in sub]
+    return docs
+
+
+def _docs_to_payload(docs: list) -> tuple[list[str], list[str], list[str]]:
+    """Transforme les docs en (sources, suggested_case_ids, full_contents)."""
+    sources = [d.content[:400] + "..." if len(d.content) > 400 else d.content for d in docs]
+    suggested_case_ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
+    full_contents = [d.content for d in docs]
+    return sources, suggested_case_ids, full_contents
+
+
+def _build_detail_prompt_payload_from_cases(
+    case_index: int,
+    cases: list[dict],
+    with_recap: bool = False,
+) -> tuple[str, list[str], list[str], list[str]] | None:
+    """Construit le payload de détail côté prompt (stream)."""
+    if not (0 <= case_index < len(cases)):
+        return None
+    content = (cases[case_index].get("content") or "").strip()
+    if not content:
+        return None
+    case_content = _build_detail_input_with_recap(case_index + 1, cases, content) if with_recap else content
+    prompt = DETAIL_PROMPT.replace("{{ case_content }}", case_content)
+    sources = [content[:400] + "..." if len(content) > 400 else content]
+    ids = [c.get("id", "") for c in cases]
+    full_contents = [c.get("content", "") for c in cases]
+    return prompt, sources, ids, full_contents
+
+
+def _build_detail_answer_payload_from_cases(
+    case_index: int,
+    cases: list[dict],
+    with_recap: bool = True,
+) -> tuple[str, list[str], list[str], list[str]] | None:
+    """Construit le payload de détail côté answer (non-stream)."""
+    if not (0 <= case_index < len(cases)):
+        return None
+    content = (cases[case_index].get("content") or "").strip()
+    if len(content) < 20:
+        return None
+    case_content = _build_detail_input_with_recap(case_index + 1, cases, content) if with_recap else content
+    answer = _run_detail_pipeline(case_content)
+    sources = [content[:400] + "..." if len(content) > 400 else content]
+    ids = [c.get("id", "") for c in cases]
+    full_contents = [c.get("content", "") for c in cases]
+    return answer, sources, ids, full_contents
 
 
 def get_rag_prompt_and_sources(
@@ -1468,70 +1813,96 @@ def get_rag_prompt_and_sources(
     pending_use_case_id: str | None = None,
     selected_domain_code: str | None = None,
     selected_sector: str | None = None,
-) -> tuple[str, list[str], list[str], list[str], str | None, str | None]:
+    selected_intention: str | None = None,
+) -> tuple[str, list[str], list[str], list[str], str | None, str | None, str | None]:
     """
-    Retourne (prompt, sources, suggested_case_ids, full_contents, selected_domain_code, selected_sector).
-    Utilise selected_domain_code / selected_sector quand fournis (stockés après Q1 / Q1.5), sinon les déduit de l'historique.
-    Les deux derniers éléments sont le domaine et le secteur après ce message (à stocker côté client).
+    Retourne (prompt, sources, suggested_case_ids, full_contents, selected_domain_code, selected_sector, selected_intention).
+    Utilise les sélections explicites du client et les met à jour avec le message courant.
+    Les trois derniers éléments sont domaine/secteur/intention après ce message (à stocker côté client).
     """
+    # Référence numérique explicite ("point 2", "2ème", etc.) :
+    # forcer le flux détail avec la liste fiable renvoyée au tour précédent.
+    if last_suggested_cases and _has_explicit_point_number(question):
+        idx = _resolve_detail_selection(question, last_suggested_cases)
+        if idx is not None:
+            payload = _build_detail_prompt_payload_from_cases(idx, last_suggested_cases)
+            if payload is not None:
+                prompt, sources, ids, full_contents = payload
+                return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+
     # Affirmation + action en attente → prompt de détail pour ce cas (pas de mise à jour domaine/secteur)
     if _is_affirmation(question) and pending_action == "expand_details" and pending_use_case_id and last_suggested_cases:
-        for case in last_suggested_cases:
+        for i, case in enumerate(last_suggested_cases):
             if (case.get("id") or "") == pending_use_case_id:
-                content = case.get("content") or ""
-                if len(content.strip()) > 20:
-                    prompt = DETAIL_PROMPT.replace("{{ case_content }}", content)
-                    sources = [content[:400] + "..." if len(content) > 400 else content]
-                    ids = [c.get("id", "") for c in last_suggested_cases]
-                    full_contents = [c.get("content", "") for c in last_suggested_cases]
-                    return prompt, sources, ids, full_contents, selected_domain_code, selected_sector
+                payload = _build_detail_prompt_payload_from_cases(i, last_suggested_cases)
+                if payload is not None:
+                    prompt, sources, ids, full_contents = payload
+                    return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
     # Affirmation « ok » sans pending_* : uniquement si on a last_suggested_cases (ordre fiable)
     if _is_affirmation(question) and last_suggested_cases:
         last_assistant = _get_last_assistant_message(history)
         if last_assistant:
             case_index_1based = _parse_offer_detail_from_text(last_assistant)
             if case_index_1based is not None and 1 <= case_index_1based <= len(last_suggested_cases):
-                content = (last_suggested_cases[case_index_1based - 1].get("content") or "").strip()
-                if len(content) > 50:
-                    prompt = DETAIL_PROMPT.replace("{{ case_content }}", content)
-                    sources = [content[:400] + "..." if len(content) > 400 else content]
-                    ids = [c.get("id", "") for c in last_suggested_cases]
-                    full_contents = [c.get("content", "") for c in last_suggested_cases]
-                    return prompt, sources, ids, full_contents, selected_domain_code, selected_sector
+                payload = _build_detail_prompt_payload_from_cases(case_index_1based - 1, last_suggested_cases)
+                if payload is not None:
+                    prompt, sources, ids, full_contents = payload
+                    return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
 
-    if last_suggested_cases and _is_detail_request(question):
+    if last_suggested_cases and (_is_detail_request(question) or _has_explicit_point_number(question)):
         idx = _resolve_detail_selection(question, last_suggested_cases)
         if idx is not None:
-            case = last_suggested_cases[idx]
-            content = case.get("content") or ""
-            prompt = DETAIL_PROMPT.replace("{{ case_content }}", content)
-            sources = [content[:400] + "..." if len(content) > 400 else content]
-            ids = [c.get("id", "") for c in last_suggested_cases]
-            full_contents = [c.get("content", "") for c in last_suggested_cases]
-            return prompt, sources, ids, full_contents, selected_domain_code, selected_sector
+            payload = _build_detail_prompt_payload_from_cases(idx, last_suggested_cases)
+            if payload is not None:
+                prompt, sources, ids, full_contents = payload
+                return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
 
-    # Le front envoie history sans le message courant : inclure question pour détecter le domaine (ex. "3" pour RH)
-    history_with_current = history + [{"role": "user", "content": question}]
-    # Réutiliser le domaine/secteur stockés après Q1/Q1.5 si fournis, sinon les déduire de l'historique
-    resolved_domain = selected_domain_code or _get_domaine_code_from_history(history_with_current)
-    resolved_sector = selected_sector or _get_sector_from_history(history_with_current, current_message=question)
+    # Demande de détail en stream sans last_suggested_cases:
+    # fallback par thème (même logique que _try_detail_flow en non-stream).
+    if _is_detail_request(question) and not last_suggested_cases:
+        # Référence explicite ("point 2") sans liste précédente fiable: ne pas deviner.
+        if _has_explicit_point_number(question):
+            pass
+        else:
+            previous = _get_previous_user_message(history)
+            if previous:
+                docs = _retrieve_docs(previous)
+                if docs:
+                    cases_from_docs = [
+                        {"id": getattr(d, "id", None) or str(i), "content": d.content}
+                        for i, d in enumerate(docs)
+                    ]
+                    idx = _resolve_detail_selection(question, cases_from_docs)
+                    if idx is not None:
+                        payload = _build_detail_prompt_payload_from_cases(idx, cases_from_docs, with_recap=True)
+                        if payload is not None:
+                            prompt, sources, ids, full_contents = payload
+                            return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+
+    history_with_current, current_domain, current_sector, current_intention = _resolve_current_selection_state(
+        history,
+        question,
+        selected_domain_code,
+        selected_sector,
+        selected_intention,
+    )
     hint = _get_rag_hint(history_with_current)
     conversation_history = _format_conversation_history(history)
     docs = []
-    if _should_inject_rag_documents(history_with_current):
-        retrieval_pipeline = build_rag_retrieval_only_pipeline()
-        print("retrieval pipeline", retrieval_pipeline)
-        result = retrieval_pipeline.run({"embedder": {"text": question}})
-        docs = result.get("retriever", {}).get("documents") or []
-        if docs and isinstance(docs[0], list):
-            docs = [d for sub in docs for d in sub]
-    sources = [d.content[:400] + "..." if len(d.content) > 400 else d.content for d in docs]
-    suggested_case_ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
-    full_contents = [d.content for d in docs]
-    secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=resolved_domain)
-    intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=resolved_domain)
-    q3_triggers_affichage = _get_q3_triggers_affichage(history_with_current, domaine_code=resolved_domain)
-    print("q3_triggers_affichage:", repr(q3_triggers_affichage))
+    if _should_inject_rag_documents(current_domain, current_sector, current_intention):
+        docs = _retrieve_docs_for_question(question)
+    sources, suggested_case_ids, full_contents = _docs_to_payload(docs)
+    secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=current_domain)
+    intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=current_domain)
+    q3_triggers_affichage = _get_q3_triggers_affichage(
+        history_with_current,
+        domaine_code=current_domain,
+        selected_intention=current_intention,
+    )
+
+    print("selected domain:", repr(current_domain))
+    print("selected scetor:", repr(current_sector))
+    print("selected intention:", repr(current_intention))
     prompt_text = _build_rag_prompt_from_docs(
         question,
         hint,
@@ -1541,14 +1912,22 @@ def get_rag_prompt_and_sources(
         secteur_choices_affichage=secteur_affichage,
         intention_choices_affichage=intention_affichage,
         q3_triggers_affichage=q3_triggers_affichage,
+        selected_domain_code=current_domain,
+        selected_sector=current_sector,
+        selected_intention=current_intention,
     )
     print("--- PROMPT RAG (get_rag_prompt_and_sources) ---")
     print(prompt_text or "Aucun contexte.")
     print("--- FIN PROMPT ---")
-    # Domaine et secteur après ce message (à stocker côté client pour la prochaine requête)
-    current_domain = _get_domaine_code_from_history(history_with_current)
-    current_sector = _get_sector_from_history(history_with_current, current_message=question)
-    return (prompt_text or "Aucun contexte."), sources, suggested_case_ids, full_contents, current_domain, current_sector
+    return (
+        (prompt_text or "Aucun contexte."),
+        sources,
+        suggested_case_ids,
+        full_contents,
+        current_domain,
+        current_sector,
+        current_intention,
+    )
 
 
 def _try_detail_flow(
@@ -1561,22 +1940,16 @@ def _try_detail_flow(
     last_suggested_cases ou en refaisant une recherche avec le dernier message user),
     retourne (answer, sources, suggested_case_ids, full_contents). Sinon None.
     """
-    if not _is_detail_request(question):
+    if not (_is_detail_request(question) or _has_explicit_point_number(question)):
         return None
 
     # 1) Utiliser last_suggested_cases si fourni et avec du contenu (seule source fiable pour l'ordre)
     if last_suggested_cases:
         idx = _resolve_detail_selection(question, last_suggested_cases)
         if idx is not None:
-            case = last_suggested_cases[idx]
-            content = (case.get("content") or "").strip()
-            if len(content) > 50:  # contenu utilisable
-                detail_input = _build_detail_input_with_recap(idx + 1, last_suggested_cases, content)
-                answer = _run_detail_pipeline(detail_input)
-                sources = [content[:400] + "..." if len(content) > 400 else content]
-                ids = [c.get("id", "") for c in last_suggested_cases]
-                full_contents = [c.get("content", "") for c in last_suggested_cases]
-                return answer, sources, ids, full_contents
+            payload = _build_detail_answer_payload_from_cases(idx, last_suggested_cases, with_recap=True)
+            if payload is not None:
+                return payload
 
     # 2) Référence explicite (point 2, 2ème…) SANS liste : ne pas deviner avec une autre recherche.
     #    L'ordre des docs récupérés ne correspond pas à la liste affichée → on éviterait la confusion.
@@ -1597,13 +1970,10 @@ def _try_detail_flow(
     idx = _resolve_detail_selection(question, cases_from_docs)
     if idx is None:
         return None
-    content = (docs[idx].content or "").strip()
-    detail_input = _build_detail_input_with_recap(idx + 1, cases_from_docs, content)
-    answer = _run_detail_pipeline(detail_input)
-    sources = [content[:400] + "..." if len(content) > 400 else content]
-    ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
-    full_contents = [d.content for d in docs]
-    return answer, sources, ids, full_contents
+    payload = _build_detail_answer_payload_from_cases(idx, cases_from_docs, with_recap=True)
+    if payload is None:
+        return None
+    return payload
 
 
 def _execute_pending_expand_details(
@@ -1613,15 +1983,7 @@ def _execute_pending_expand_details(
     """Exécute l'action expand_details pour le cas donné. Retourne (answer, sources, ids, full_contents) ou None."""
     for idx, case in enumerate(last_suggested_cases):
         if (case.get("id") or "") == pending_use_case_id:
-            content = (case.get("content") or "").strip()
-            if len(content) < 20:
-                return None
-            detail_input = _build_detail_input_with_recap(idx + 1, last_suggested_cases, content)
-            answer = _run_detail_pipeline(detail_input)
-            sources = [content[:400] + "..." if len(content) > 400 else content]
-            ids = [c.get("id", "") for c in last_suggested_cases]
-            full_contents = [c.get("content", "") for c in last_suggested_cases]
-            return answer, sources, ids, full_contents
+            return _build_detail_answer_payload_from_cases(idx, last_suggested_cases, with_recap=True)
     return None
 
 
@@ -1633,18 +1995,19 @@ def query_rag_haystack(
     pending_use_case_id: str | None = None,
     selected_domain_code: str | None = None,
     selected_sector: str | None = None,
-) -> tuple[str, list[str], list[str], list[str], str | None, str | None, int | None, str | None, str | None]:
+    selected_intention: str | None = None,
+) -> tuple[str, list[str], list[str], list[str], str | None, str | None, int | None, str | None, str | None, str | None]:
     """
-    Interroge le RAG. Retourne (answer, sources, suggested_case_ids, full_contents, pending_action, pending_use_case_id, pending_case_index, selected_domain_code, selected_sector).
-    selected_domain_code/selected_sector : stockés après Q1/Q1.5, réutilisés si fournis.
-    Les deux derniers retours sont le domaine et le secteur après ce message (à stocker côté client).
+    Interroge le RAG. Retourne (answer, sources, suggested_case_ids, full_contents, pending_action, pending_use_case_id, pending_case_index, selected_domain_code, selected_sector, selected_intention).
+    selected_domain_code/selected_sector/selected_intention : état explicite fourni par le client.
+    Les trois derniers retours sont domaine/secteur/intention après ce message (à stocker côté client).
     """
     # 1) Affirmation + action en attente fournie par le client → exécuter l'action
     if _is_affirmation(question) and pending_action == "expand_details" and pending_use_case_id and last_suggested_cases:
         result = _execute_pending_expand_details(pending_use_case_id, last_suggested_cases)
         if result is not None:
             a, s, i, f = result
-            return a, s, i, f, None, None, None, selected_domain_code, selected_sector
+            return a, s, i, f, None, None, None, selected_domain_code, selected_sector, selected_intention
 
     # 2) Affirmation sans pending_* : inférer depuis le dernier message assistant (offre de détail)
     if _is_affirmation(question) and last_suggested_cases:
@@ -1652,41 +2015,40 @@ def query_rag_haystack(
         if last_assistant:
             case_index_1based = _parse_offer_detail_from_text(last_assistant)
             if case_index_1based is not None and 1 <= case_index_1based <= len(last_suggested_cases):
-                case = last_suggested_cases[case_index_1based - 1]
-                content = (case.get("content") or "").strip()
-                if len(content) > 50:
-                    detail_input = _build_detail_input_with_recap(case_index_1based, last_suggested_cases, content)
-                    answer = _run_detail_pipeline(detail_input)
-                    sources = [content[:400] + "..." if len(content) > 400 else content]
-                    ids = [c.get("id", "") for c in last_suggested_cases]
-                    full_contents = [c.get("content", "") for c in last_suggested_cases]
-                    return answer, sources, ids, full_contents, None, None, None, selected_domain_code, selected_sector
+                payload = _build_detail_answer_payload_from_cases(case_index_1based - 1, last_suggested_cases, with_recap=True)
+                if payload is not None:
+                    answer, sources, ids, full_contents = payload
+                    return answer, sources, ids, full_contents, None, None, None, selected_domain_code, selected_sector, selected_intention
 
     # 3) Demande explicite de détail (« détaille le 2 »)
     detail_result = _try_detail_flow(question, history, last_suggested_cases)
     if detail_result is not None:
         a, s, i, f = detail_result
-        return a, s, i, f, None, None, None, selected_domain_code, selected_sector
+        return a, s, i, f, None, None, None, selected_domain_code, selected_sector, selected_intention
 
-    # 4) Flux RAG normal : réutiliser domaine/secteur stockés si fournis
-    history_with_current = history + [{"role": "user", "content": question}]
-    resolved_domain = selected_domain_code or _get_domaine_code_from_history(history_with_current)
+    # 4) Flux RAG normal : utiliser l'état explicite client, mis à jour par le message courant
+    history_with_current, current_domain, current_sector, current_intention = _resolve_current_selection_state(
+        history,
+        question,
+        selected_domain_code,
+        selected_sector,
+        selected_intention,
+    )
     hint = _get_rag_hint(history_with_current)
     conversation_history = _format_conversation_history(history)
     docs = []
-    if _should_inject_rag_documents(history_with_current):
-        retrieval_pipeline = build_rag_retrieval_only_pipeline()
-        result = retrieval_pipeline.run({"embedder": {"text": question}})
-        docs = result.get("retriever", {}).get("documents") or []
-        if docs and isinstance(docs[0], list):
-            docs = [d for sub in docs for d in sub]
-    sources = [d.content[:400] + "..." if len(d.content) > 400 else d.content for d in docs]
-    suggested_case_ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
-    full_contents = [d.content for d in docs]
-    secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=resolved_domain)
-    intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=resolved_domain)
-    q3_triggers_affichage = _get_q3_triggers_affichage(history_with_current, domaine_code=resolved_domain)
+    if _should_inject_rag_documents(current_domain, current_sector, current_intention):
+        docs = _retrieve_docs_for_question(question)
+    sources, suggested_case_ids, full_contents = _docs_to_payload(docs)
+    secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=current_domain)
+    intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=current_domain)
+    q3_triggers_affichage = _get_q3_triggers_affichage(
+        history_with_current,
+        domaine_code=current_domain,
+        selected_intention=current_intention,
+    )
     print("q3_triggers_affichage:", repr(q3_triggers_affichage))
+    print("currnet domain:", current_domain)
     prompt_text = _build_rag_prompt_from_docs(
         question,
         hint,
@@ -1696,6 +2058,9 @@ def query_rag_haystack(
         secteur_choices_affichage=secteur_affichage,
         intention_choices_affichage=intention_affichage,
         q3_triggers_affichage=q3_triggers_affichage,
+        selected_domain_code=current_domain,
+        selected_sector=current_sector,
+        selected_intention=current_intention,
     )
     print("--- PROMPT RAG (query_rag_haystack) ---")
     print(prompt_text or "Aucun contexte.")
@@ -1707,13 +2072,33 @@ def query_rag_haystack(
     if hasattr(answer, "content"):
         answer = answer.content
 
-    current_domain = _get_domaine_code_from_history(history_with_current)
-    current_sector = _get_sector_from_history(history_with_current, current_message=question)
     pending_case_index = _parse_offer_detail_from_text(answer)
     if pending_case_index is not None and 1 <= pending_case_index <= len(suggested_case_ids):
         pending_uid = suggested_case_ids[pending_case_index - 1]
-        return answer, sources, suggested_case_ids, full_contents, "expand_details", pending_uid, pending_case_index, current_domain, current_sector
-    return answer, sources, suggested_case_ids, full_contents, None, None, None, current_domain, current_sector
+        return (
+            answer,
+            sources,
+            suggested_case_ids,
+            full_contents,
+            "expand_details",
+            pending_uid,
+            pending_case_index,
+            current_domain,
+            current_sector,
+            current_intention,
+        )
+    return (
+        answer,
+        sources,
+        suggested_case_ids,
+        full_contents,
+        None,
+        None,
+        None,
+        current_domain,
+        current_sector,
+        current_intention,
+    )
 
 
 def clear_all_documents() -> None:

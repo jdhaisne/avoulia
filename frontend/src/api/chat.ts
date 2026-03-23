@@ -40,6 +40,7 @@ export interface ChatRequest {
   pending_use_case_id?: string | null
   selected_domain_code?: string | null
   selected_sector?: string | null
+  selected_intention?: string | null
 }
 
 export interface ChatResponse {
@@ -68,6 +69,7 @@ export interface StreamDonePayload {
   suggested_case_ids?: string[]
   selected_domain_code?: string | null
   selected_sector?: string | null
+  selected_intention?: string | null
   pending_action?: string | null
   pending_use_case_id?: string | null
   pending_case_index?: number | null
@@ -121,6 +123,7 @@ export async function sendMessageStream(
               suggested_case_ids?: string[]
               selected_domain_code?: string | null
               selected_sector?: string | null
+              selected_intention?: string | null
               pending_action?: string | null
               pending_use_case_id?: string | null
               pending_case_index?: number | null
@@ -138,6 +141,7 @@ export async function sendMessageStream(
                 suggested_case_ids: data.suggested_case_ids,
                 selected_domain_code: data.selected_domain_code ?? null,
                 selected_sector: data.selected_sector ?? null,
+                selected_intention: data.selected_intention ?? null,
                 pending_action: data.pending_action ?? null,
                 pending_use_case_id: data.pending_use_case_id ?? null,
                 pending_case_index: data.pending_case_index ?? null,
@@ -159,6 +163,7 @@ export async function sendMessageStream(
           suggested_case_ids?: string[]
           selected_domain_code?: string | null
           selected_sector?: string | null
+          selected_intention?: string | null
           pending_action?: string | null
           pending_use_case_id?: string | null
           pending_case_index?: number | null
@@ -170,6 +175,7 @@ export async function sendMessageStream(
             suggested_case_ids: data.suggested_case_ids,
             selected_domain_code: data.selected_domain_code ?? null,
             selected_sector: data.selected_sector ?? null,
+            selected_intention: data.selected_intention ?? null,
             pending_action: data.pending_action ?? null,
             pending_use_case_id: data.pending_use_case_id ?? null,
             pending_case_index: data.pending_case_index ?? null,

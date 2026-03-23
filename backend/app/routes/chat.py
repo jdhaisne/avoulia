@@ -53,6 +53,7 @@ def chat(request: ChatRequest):
                 pending_case_index,
                 selected_domain_code,
                 selected_sector,
+                selected_intention,
             ) = query_rag_haystack(
                 request.message,
                 history,
@@ -61,6 +62,7 @@ def chat(request: ChatRequest):
                 pending_use_case_id=request.pending_use_case_id,
                 selected_domain_code=request.selected_domain_code,
                 selected_sector=request.selected_sector,
+                selected_intention=request.selected_intention,
             )
             suggested_cases = _build_suggested_cases(suggested_case_ids, full_contents) if full_contents else None
             return ChatResponse(
@@ -73,6 +75,7 @@ def chat(request: ChatRequest):
                 pending_case_index=pending_case_index,
                 selected_domain_code=selected_domain_code,
                 selected_sector=selected_sector,
+                selected_intention=selected_intention,
             )
         answer = chat_simple(request.message, history)
         return ChatResponse(answer=answer, sources=[])
@@ -93,6 +96,7 @@ def _stream_chat(request: ChatRequest):
                 full_contents,
                 selected_domain_code,
                 selected_sector,
+                selected_intention,
             ) = get_rag_prompt_and_sources(
                 request.message,
                 history,
@@ -101,6 +105,7 @@ def _stream_chat(request: ChatRequest):
                 pending_use_case_id=request.pending_use_case_id,
                 selected_domain_code=request.selected_domain_code,
                 selected_sector=request.selected_sector,
+                selected_intention=request.selected_intention,
             )
             for chunk in stream_prompt(prompt_text):
                 yield _sse_line({"t": chunk})
@@ -112,6 +117,7 @@ def _stream_chat(request: ChatRequest):
                 "suggested_cases": [{"id": c.id, "content": c.content} for c in suggested_cases],
                 "selected_domain_code": selected_domain_code,
                 "selected_sector": selected_sector,
+                "selected_intention": selected_intention,
             }
             yield _sse_line(done_payload)
         else:
