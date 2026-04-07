@@ -4,6 +4,7 @@ RAG avec Haystack + Chroma, via Azure AI Foundry.
 - Chat : modèle gpt-5-chat sur Foundry (avec ou sans RAG).
 """
 
+import logging
 import re
 from pathlib import Path
 
@@ -16,116 +17,23 @@ from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
 
 from app.config import get_settings
-
-# Premier message envoyé par l'agent au chargement du chat (exposé via GET /chat/welcome).
-WELCOME_MESSAGE = (
-    "Bonjour, je vais vous aider à identifier des cas d'usage concrets "
-    "de l'IA adaptés à votre organisation. Pour commencer, je vais vous "
-    "poser quelques questions simples afin de cibler précisément votre priorité."
+from app.rag_constants import (
+    CASE_EXTRA_FIELD_ALIASES,
+    CASE_EXTRA_KEYS,
+    CHOIX_Q1_TO_DOMAINE_CODE,
+    CHROMA_DOMAIN_META_FILTER_FIELDS,
+    DOMAINES_SANS_SECTEURS,
+    DOMAINE_META_KEYS,
+    INTENTIONS_PAR_DOMAINE,
+    INTENTION_META_KEYS,
+    Q1_DOMAINS_LIST,
+    Q3_TRIGGERS_DISPLAY_LIMIT,
+    SECTEURS_PAR_DOMAINE,
+    TRIGGER_META_KEYS,
+    WELCOME_MESSAGE,
 )
 
-# Domaines sans liste de secteurs (référence) : absents de SECTEURS_PAR_DOMAINE, Q1.5 est ignorée pour eux.
-DOMAINES_SANS_SECTEURS = ["direction_strategie", "innovation_rnd", "it_systemes_donnees"]
-
-# Secteurs proposés pour Q1.5 selon le domaine choisi (choix 1–14).
-SECTEURS_PAR_DOMAINE = {
-    "ressources_humaines": [
-        "BTP", "Industrie", "Services & artisanat",
-        "Hôtellerie & tourisme",
-    ],
-    "organisation_coordination": [
-        "Commerce & retail", "Industrie",
-        "Santé & médico-social", "Agroalimentaire",
-        "Transport & logistique", "Restauration",
-        "Cabinet & conseil",
-    ],
-    "conformite_risque": [
-        "BTP", "Industrie", "Agroalimentaire",
-        "Santé & médico-social", "Transport & logistique",
-        "Cabinet & conseil",
-    ],
-    "finance_pilotage": [
-        "BTP", "Commerce & retail", "Industrie",
-        "Santé & médico-social", "Agroalimentaire",
-        "Cabinet & conseil", "Restauration",
-        "Services & artisanat", "Hôtellerie & tourisme",
-        "Énergie & télécoms",
-    ],
-    "production": [
-        "Industrie", "Agroalimentaire", "BTP",
-        "Restauration", "Services & artisanat",
-        "Cabinet & conseil", "Transport & logistique",
-    ],
-    "relation_client": [
-        "Commerce & retail", "Hôtellerie & tourisme",
-        "Industrie", "BTP", "Santé & médico-social",
-        "Agroalimentaire", "Restauration",
-        "Cabinet & conseil", "Services & artisanat",
-    ],
-    "marketing_visibilite": [
-        "Commerce & retail", "Restauration",
-        "Hôtellerie & tourisme", "Industrie",
-        "Transport & logistique", "Services & artisanat",
-    ],
-    "activites_terrain": [
-        "BTP", "Services & artisanat",
-        "Santé & médico-social", "Commerce & retail",
-        "Industrie", "Transport & logistique",
-        "Agroalimentaire",
-    ],
-    "ventes_developpement": [
-        "Commerce & retail", "Industrie", "BTP",
-        "Restauration", "Services & artisanat",
-    ],
-    "logistique_stocks": [
-        "Transport & logistique", "Industrie",
-        "Commerce & retail", "Agroalimentaire",
-        "Restauration",
-    ],
-    "achats_fournisseurs": [
-        "Industrie", "BTP", "Commerce & retail",
-        "Transport & logistique", "Restauration",
-    ],
-}
-
-# Correspondance choix Q1 (1–14) → code domaine. Source unique pour la question Q1.
-CHOIX_Q1_TO_DOMAINE_CODE = {
-    1: "direction_strategie",
-    2: "organisation_coordination",
-    3: "ressources_humaines",
-    4: "ventes_developpement",
-    5: "marketing_visibilite",
-    6: "relation_client",
-    7: "finance_pilotage",
-    8: "it_systemes_donnees",
-    9: "conformite_risque",
-    10: "achats_fournisseurs",
-    11: "logistique_stocks",
-    12: "production",
-    13: "activites_terrain",
-    14: "innovation_rnd",
-}
-
-# Libellés des 14 choix Q1 (ordre 1 à 14), pour affichage et matching. Dérivé de CHOIX_Q1_TO_DOMAINE_CODE.
-Q1_DOMAINS_LIST = [
-    "Direction & décisions stratégiques",
-    "Organisation & efficacité interne",
-    "RH & gestion des équipes",
-    "Développement commercial",
-    "Marketing & visibilité",
-    "Service & relation client",
-    "Finances & rentabilité",
-    "Outils, systèmes & données",
-    "Obligations & gestion des risques",
-    "Achats & relations fournisseurs",
-    "Stocks & logistique",
-    "Production & opérations",
-    "Chantiers & activités terrain",
-    "Innovation & nouveaux projets",
-]
-
-# Intentions (objectifs) par domaine pour Q2. Si vide, on tente de les charger depuis Chroma (meta "intention" / "domaine_label").
-INTENTIONS_PAR_DOMAINE: dict[str, list[str]] = {code: [] for code in CHOIX_Q1_TO_DOMAINE_CODE.values()}
+logger = logging.getLogger(__name__)
 
 
 def get_q15_choices(domaine_code: str) -> list[str] | None:
@@ -144,13 +52,6 @@ def _get_domaine_label(domaine_code: str) -> str:
         if code == domaine_code:
             return Q1_DOMAINS_LIST[choix - 1]
     return domaine_code or "—"
-
-
-# Noms de colonnes possibles dans l'index (XLSX) pour domaine et intention (selon en-têtes du fichier).
-DOMAINE_META_KEYS = ("domaine_label", "domaine_label_fr", "Domaine", "domaine")
-INTENTION_META_KEYS = ("intention", "Intention", "objectif", "Objectif")
-# Clés meta pour les triggers (exemples de situations) Q3 — colonnes XLSX possibles.
-TRIGGER_META_KEYS = ("trigger", "Trigger", "situation", "Situation", "situation_trigger", "exemple_situation", "declencheurs_typiques")
 
 
 def _get_trigger_from_meta(meta: dict) -> str:
@@ -185,18 +86,141 @@ def _get_intention_from_meta(meta: dict) -> str:
     return ""
 
 
-def _get_intentions_from_store(domaine_code: str) -> list[str]:
+def _meta_first_nonempty(meta: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        raw = meta.get(key)
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if s:
+            return s
+    return ""
+
+
+def _case_extra_fields_from_meta(meta: dict | None) -> dict[str, str | None]:
+    meta = meta or {}
+    out: dict[str, str | None] = {}
+    for canonical, aliases in CASE_EXTRA_FIELD_ALIASES.items():
+        val = _meta_first_nonempty(meta, aliases)
+        out[canonical] = val if val else None
+    return out
+
+
+def _case_extras_from_case_dict(case: dict) -> dict[str, str | None]:
+    out: dict[str, str | None] = {}
+    for key in CASE_EXTRA_KEYS:
+        raw = case.get(key)
+        if raw is None:
+            out[key] = None
+            continue
+        s = str(raw).strip()
+        out[key] = s if s else None
+    return out
+
+
+def _doc_to_case_dict(doc, index: int) -> dict:
+    meta = getattr(doc, "meta", None) or {}
+    extras = _case_extra_fields_from_meta(meta)
+    return {
+        "id": str(getattr(doc, "id", None) or index),
+        "content": getattr(doc, "content", None) or "",
+        **extras,
+    }
+
+
+def _format_case_extra_block(case: dict) -> str:
+    """Bloc texte des champs structurés pour injection dans les prompts (détail / contexte modèle)."""
+    labels = {
+        "effort": "Niveau d'effort (effort)",
+        "prerequis_donnees": "Prérequis données (prerequis_donnees)",
+        "guardrails": "Guardrails",
+        "questions_qualification": "Questions de qualification",
+        "sensibilite_donnees": "Sensibilité des données (contexte pour le point de vigilance)",
+    }
+    lines: list[str] = []
+    for key in CASE_EXTRA_KEYS:
+        raw = case.get(key)
+        if raw is None:
+            continue
+        val = str(raw).strip()
+        if not val:
+            continue
+        lines.append(f"- {labels[key]} : {val}")
+    if not lines:
+        return ""
+    return "Données structurées du cas (fichier source) :\n" + "\n".join(lines)
+
+
+def _append_structured_case_fields_to_content(content: str, case: dict) -> str:
+    block = _format_case_extra_block(case)
+    if not block:
+        return content
+    return content.rstrip() + "\n\n" + block
+
+
+def _build_metadata_or_filter(meta_keys: tuple[str, ...], values: list[str | None]) -> dict | None:
+    """Construit un filtre OR multi-champs pour les metadata Chroma."""
+    normalized_values: list[str] = []
+    for value in values:
+        candidate = (value or "").strip()
+        if candidate and candidate not in normalized_values:
+            normalized_values.append(candidate)
+
+    if not normalized_values:
+        return None
+
+    conditions = [
+        {"field": f"meta.{meta_key}", "operator": "==", "value": value}
+        for meta_key in meta_keys
+        for value in normalized_values
+    ]
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"operator": "OR", "conditions": conditions}
+
+
+def _build_retrieval_filters(
+    domaine_code: str | None = None,
+    intention_code: str | None = None,
+) -> dict | None:
+    """Construit les filtres metadata appliqués avant le retrieval vectoriel."""
+    conditions: list[dict] = []
+
+    domaine_label = _get_domaine_label(domaine_code) if domaine_code else None
+    domain_filter = _build_metadata_or_filter(DOMAINE_META_KEYS, [domaine_label, domaine_code])
+    if domain_filter:
+        conditions.append(domain_filter)
+
+    intention_label = (
+        _get_intention_label_from_code(domaine_code, intention_code)
+        if domaine_code and intention_code
+        else None
+    )
+    intention_filter = _build_metadata_or_filter(INTENTION_META_KEYS, [intention_label])
+    if intention_filter:
+        conditions.append(intention_filter)
+
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"operator": "AND", "conditions": conditions}
+
+
+def _fetch_documents_for_domaine(domaine_code: str, *, top_k_fallback: int = 150) -> list:
     """
-    Récupère les intentions distinctes depuis Chroma pour ce domaine.
-    Essaie filter_documents avec plusieurs noms de champs meta, puis fallback par retrieval + filtre en Python.
+    Documents Chroma dont les métadonnées correspondent au domaine (libellé Q1 ou code interne).
+    Stratégie : filter_documents sur plusieurs champs meta, puis fallback retrieval + filtre Python.
     """
     label = _get_domaine_label(domaine_code) if domaine_code else None
     docs: list = []
-
+    if not domaine_code and not label:
+        return docs
     try:
         store = get_document_store()
-        # 1) Filtre par domaine (plusieurs clés meta possibles selon les en-têtes XLSX)
-        for field in ("meta.domaine_label", "meta.domaine", "meta.Domaine"):
+        for field in CHROMA_DOMAIN_META_FILTER_FIELDS:
             try:
                 if label:
                     docs = store.filter_documents(
@@ -210,11 +234,10 @@ def _get_intentions_from_store(domaine_code: str) -> list[str]:
                     break
             except Exception:
                 continue
-        # 2) Fallback : retrieval large puis filtre en Python (si filter_documents ne matche pas)
         if not docs and (label or domaine_code):
             query = label or domaine_code.replace("_", " ")
             try:
-                all_candidates = _retrieve_docs(query, top_k=150)
+                all_candidates = _retrieve_docs(query, top_k=top_k_fallback)
                 if all_candidates and isinstance(all_candidates[0], list):
                     all_candidates = [d for sub in all_candidates for d in sub]
             except Exception:
@@ -224,7 +247,15 @@ def _get_intentions_from_store(domaine_code: str) -> list[str]:
                     docs.append(d)
     except Exception:
         pass
+    return docs
 
+
+def _get_intentions_from_store(domaine_code: str) -> list[str]:
+    """
+    Récupère les intentions distinctes depuis Chroma pour ce domaine.
+    Essaie filter_documents avec plusieurs noms de champs meta, puis fallback par retrieval + filtre en Python.
+    """
+    docs = _fetch_documents_for_domaine(domaine_code)
     seen: set[str] = set()
     out: list[str] = []
     for d in docs:
@@ -241,38 +272,7 @@ def _get_triggers_from_store(domaine_code: str, intention: str | None = None) ->
     Récupère les triggers (exemples de situations) distincts depuis Chroma pour ce domaine,
     optionnellement filtrés par intention. Même logique que _get_intentions_from_store pour les docs.
     """
-    label = _get_domaine_label(domaine_code) if domaine_code else None
-    docs: list = []
-
-    try:
-        store = get_document_store()
-        for field in ("meta.domaine_label", "meta.domaine", "meta.Domaine"):
-            try:
-                if label:
-                    docs = store.filter_documents(
-                        filters={"field": field, "operator": "==", "value": label}
-                    )
-                if not docs and domaine_code:
-                    docs = store.filter_documents(
-                        filters={"field": field, "operator": "==", "value": domaine_code}
-                    )
-                if docs:
-                    break
-            except Exception:
-                continue
-        if not docs and (label or domaine_code):
-            query = label or domaine_code.replace("_", " ")
-            try:
-                all_candidates = _retrieve_docs(query, top_k=150)
-                if all_candidates and isinstance(all_candidates[0], list):
-                    all_candidates = [d for sub in all_candidates for d in sub]
-            except Exception:
-                all_candidates = []
-            for d in all_candidates:
-                if _doc_matches_domain(d, label, domaine_code):
-                    docs.append(d)
-    except Exception:
-        pass
+    docs = _fetch_documents_for_domaine(domaine_code)
 
     if intention:
         intention_norm = intention.strip().lower()
@@ -669,28 +669,51 @@ Tu présentes :
 - tu ne proposes jamais de nouveaux intentions
 - tu ne proposes jamais de nouveaux micro-thèmes
 
--------------------------------------
-FORMAT OBLIGATOIRE POUR CHAQUE CAS
--------------------------------------
-
-Présente clairement chaque cas avec un numéro qui correspond à son rang dans la liste (1, 2, 3, etc.), par exemple :
-- « 1. Nom du cas »
-- « 2. Nom du cas »
-
-Ces numéros doivent rester stables pour que l'utilisateur puisse dire « le 2ème », « le point 3 », etc.
-Ne change jamais l'ordre, ne renumérote jamais.
-
-🔹 Nom du cas
-
-Pourquoi c'est pertinent pour vous :
-(1 à 2 phrases contextualisées par rapport au problème exprimé
-en Q3.)
-
+FORMAT OBLIGATOIRE POUR CHAQUE CAS — NIVEAU 1 (APERÇU)
+(présentation initiale, 3 à 5 cas)
+ [Numéro]. Nom du cas
+Pourquoi c’est pertinent pour vous :
+(1 à 2 phrases contextualisées par rapport au problème Q3.)
 Ce que cela permet concrètement :
 (Description claire et opérationnelle, sans jargon technique.)
+---
+Après les 3–5 cas, tu ajoutes EXACTEMENT :
+« Souhaitez-vous approfondir l’un de ces cas ?
+Indiquez son numéro pour obtenir le détail complet. »
+Règles Niveau 1 :
+- Tu ne montres PAS l’effort, les prérequis, la première
+étape, les guardrails, ni les questions de qualification.
+- Tu gardes chaque cas court (5–6 lignes max).
 
+- L’objectif est de permettre un scan rapide.
+
+FORMAT APPROFONDI — NIVEAU 2 (SUR DEMANDE)
+ Nom du cas
+Pourquoi c’est pertinent pour vous :
+(1 à 2 phrases contextualisées par rapport au problème Q3.)
+Ce que cela permet concrètement :
+(Description claire et opérationnelle, sans jargon technique.)
+Niveau d’effort : [Faible / Moyen / Élevé]
+Ce qu’il vous faut pour démarrer :
+(Reformulation claire de prerequis_donnees.)
 Première étape simple :
-(Reformulation claire de la première action proposée.)
+(Reformulation claire de premiere_action_48h.)
+⚠️ Point de vigilance :
+(Reformulation accessible de guardrails. Omis si vide.)
+ Auto-diagnostic rapide
+Avant de vous lancer, posez-vous ces questions :
+• [question_qualification_1 reformulée]
+• [question_qualification_2 reformulée]
+• [question_qualification_3 reformulée]
+Si vous répondez « non » à au moins 2 de ces questions,
+ce cas est particulièrement pertinent pour vous.
+Règles Niveau 2 :
+- Tu affiches TOUTES les questions_qualification du cas.
+- Tu reformules pour un dirigeant non technique.
+- Tu n’inventes jamais de question hors du backend.
+- Phrase « au moins 2 » : seulement si ≥ 3 questions.
+- Si 2 questions : « Ces questions vous aideront à
+évaluer si ce cas répond à votre situation. »
 
 -------------------------------------
 RÈGLES STRICTES
@@ -707,6 +730,7 @@ Tu ne :
 - ajoutes jamais un sixième cas
 - inventes jamais un cas
 - interprètes jamais la taxonomie
+- inventes jamais de question d’auto-diagnostic hors de celles fournies par le backend
 
 Ton ton est :
 - clair
@@ -732,6 +756,10 @@ Résumé des choix utilisateur :
 {% if identified_cases_summary %}
 Cas identifiés (3 à 5) :
 {{ identified_cases_summary }}
+
+{% endif %}
+{% if cases_extra_context %}
+{{ cases_extra_context }}
 
 {% endif %}
 {% if detail_prompt_context %}
@@ -763,9 +791,10 @@ L'utilisateur a demandé à détailler un cas précis que tu avais proposé. Tu 
 - l'impact concret (primary_value),
 - le gain attendu (expected_gain_proxy),
 - le mode, l'effort, la complexité et le délai,
-- la vigilance données (data_sensitivity, guardrails_pme),
+- la vigilance données : croise guardrails / points de vigilance avec la sensibilité des données (sensibilite_donnees) lorsque fournie,
 - un premier pas faisable en 48h,
 - les prérequis simples.
+- les questions de qualification listées (questions_qualification), sans en inventer d'autres
 - après le détail, proposer uniquement de revenir à la liste ou de terminer, sans inventer de nouveaux services
 
 Données complètes du cas à détailler :
@@ -847,6 +876,23 @@ def _build_rag_prompt_from_docs(
             short = content[:240] + "..." if len(content) > 240 else content
             lines.append(f"{i}. {short}")
         identified_cases_summary = "\n".join(lines)
+    cases_extra_context = ""
+    if docs:
+        selected_for_context = docs[:5]
+        if len(selected_for_context) < 3 and len(docs) >= 3:
+            selected_for_context = docs[:3]
+        blocks: list[str] = []
+        for i, d in enumerate(selected_for_context, start=1):
+            ex = _case_extra_fields_from_meta(getattr(d, "meta", None) or {})
+            blk = _format_case_extra_block(ex)
+            if blk:
+                blocks.append(f"Cas {i} :\n{blk}")
+        if blocks:
+            cases_extra_context = (
+                "Champs structurés par cas (fichier source ; niveau 1 : ne pas les afficher dans l'aperçu ; "
+                "niveau 2 : t'en servir pour effort, prérequis, guardrails, questions de qualification, sensibilité données) :\n\n"
+                + "\n\n".join(blocks)
+            )
     detail_prompt_context = ""
     if _is_detail_request(query) or _has_explicit_point_number(query):
         detail_prompt_context = DETAIL_PROMPT
@@ -857,6 +903,7 @@ def _build_rag_prompt_from_docs(
         hint=phase_hint,
         user_choices_summary=user_choices_summary,
         identified_cases_summary=identified_cases_summary,
+        cases_extra_context=cases_extra_context,
         detail_prompt_context=detail_prompt_context,
         conversation_history=conversation_history or "",
         documents=docs,
@@ -1060,13 +1107,13 @@ def _get_previous_user_message(history: list[dict]) -> str | None:
     return None
 
 
-def _retrieve_docs(query: str, top_k: int | None = None) -> list:
+def _retrieve_docs(query: str, top_k: int | None = None, filters: dict | None = None) -> list:
     """Lance une recherche RAG et retourne la liste de documents (sans génération)."""
     s = get_settings()
     k = top_k or s.top_k_retrieve
     store = get_document_store()
     embedder = _get_text_embedder()
-    retriever = ChromaEmbeddingRetriever(document_store=store, top_k=k)
+    retriever = ChromaEmbeddingRetriever(document_store=store, filters=filters, top_k=k)
     pipeline = Pipeline()
     pipeline.add_component("embedder", embedder)
     pipeline.add_component("retriever", retriever)
@@ -1152,12 +1199,12 @@ def _resolve_detail_selection(
     return best_idx
 
 
-def build_rag_retrieval_only_pipeline():
+def build_rag_retrieval_only_pipeline(filters: dict | None = None):
     """Pipeline retrieval seul : embedder -> retriever. Pour construire le prompt nous-mêmes depuis les mêmes docs."""
     s = get_settings()
     store = get_document_store()
     embedder = _get_text_embedder()
-    retriever = ChromaEmbeddingRetriever(document_store=store, top_k=s.top_k_retrieve)
+    retriever = ChromaEmbeddingRetriever(document_store=store, filters=filters, top_k=s.top_k_retrieve)
     pipeline = Pipeline()
     pipeline.add_component("embedder", embedder)
     pipeline.add_component("retriever", retriever)
@@ -1227,10 +1274,11 @@ def _build_detail_input_with_recap(
 
 def _run_detail_pipeline(case_content: str) -> str:
     """Génère une réponse de détail pour un seul cas (pas de retrieval)."""
-    prompt_str = DETAIL_PROMPT.replace("{{ case_content }}", case_content)
-    print("--- PROMPT DETAIL (_run_detail_pipeline) ---")
-    print(prompt_str or "Aucun contexte.")
-    print("--- FIN PROMPT DETAIL ---")
+    logger.debug(
+        "prompt_detail case_content_len=%s preview=%r",
+        len(case_content or ""),
+        (case_content or "")[:500],
+    )
     prompt_builder = PromptBuilder(template=DETAIL_PROMPT)
     generator = _get_generator()
     pipeline = Pipeline()
@@ -1645,9 +1693,6 @@ def _get_intention_choices_affichage(history: list[dict], domaine_code: str | No
     return "\n".join(f"{i}. {s}" for i, s in enumerate(choices, start=1))
 
 
-Q3_TRIGGERS_DISPLAY_LIMIT = 12
-
-
 def _get_q3_triggers_affichage(
     history: list[dict],
     domaine_code: str | None = None,
@@ -1749,9 +1794,17 @@ def _resolve_current_selection_state(
     return history_with_current, current_domain, current_sector, current_intention
 
 
-def _retrieve_docs_for_question(question: str) -> list:
+def _retrieve_docs_for_question(
+    question: str,
+    selected_domain_code: str | None = None,
+    selected_intention: str | None = None,
+) -> list:
     """Récupère les documents pertinents pour la question (avec flatten si nested list)."""
-    retrieval_pipeline = build_rag_retrieval_only_pipeline()
+    retrieval_filters = _build_retrieval_filters(
+        domaine_code=selected_domain_code,
+        intention_code=selected_intention,
+    )
+    retrieval_pipeline = build_rag_retrieval_only_pipeline(filters=retrieval_filters)
     result = retrieval_pipeline.run({"embedder": {"text": question}})
     docs = result.get("retriever", {}).get("documents") or []
     if docs and isinstance(docs[0], list):
@@ -1759,50 +1812,62 @@ def _retrieve_docs_for_question(question: str) -> list:
     return docs
 
 
-def _docs_to_payload(docs: list) -> tuple[list[str], list[str], list[str]]:
-    """Transforme les docs en (sources, suggested_case_ids, full_contents)."""
+def _docs_to_payload(docs: list) -> tuple[list[str], list[str], list[str], list[dict[str, str | None]]]:
+    """Transforme les docs en (sources, suggested_case_ids, full_contents, case_extras)."""
+    case_dicts = [_doc_to_case_dict(d, i) for i, d in enumerate(docs)]
     sources = [d.content[:400] + "..." if len(d.content) > 400 else d.content for d in docs]
-    suggested_case_ids = [getattr(d, "id", None) or str(i) for i, d in enumerate(docs)]
-    full_contents = [d.content for d in docs]
-    return sources, suggested_case_ids, full_contents
+    suggested_case_ids = [c["id"] for c in case_dicts]
+    full_contents = [c["content"] for c in case_dicts]
+    case_extras = [_case_extras_from_case_dict(c) for c in case_dicts]
+    return sources, suggested_case_ids, full_contents, case_extras
 
 
 def _build_detail_prompt_payload_from_cases(
     case_index: int,
     cases: list[dict],
     with_recap: bool = False,
-) -> tuple[str, list[str], list[str], list[str]] | None:
+) -> tuple[str, list[str], list[str], list[str], list[dict[str, str | None]]] | None:
     """Construit le payload de détail côté prompt (stream)."""
     if not (0 <= case_index < len(cases)):
         return None
-    content = (cases[case_index].get("content") or "").strip()
+    case_row = cases[case_index]
+    content = (case_row.get("content") or "").strip()
     if not content:
         return None
-    case_content = _build_detail_input_with_recap(case_index + 1, cases, content) if with_recap else content
+    content_for_model = _append_structured_case_fields_to_content(content, case_row)
+    case_content = (
+        _build_detail_input_with_recap(case_index + 1, cases, content_for_model) if with_recap else content_for_model
+    )
     prompt = DETAIL_PROMPT.replace("{{ case_content }}", case_content)
     sources = [content[:400] + "..." if len(content) > 400 else content]
     ids = [c.get("id", "") for c in cases]
     full_contents = [c.get("content", "") for c in cases]
-    return prompt, sources, ids, full_contents
+    case_extras = [_case_extras_from_case_dict(c) for c in cases]
+    return prompt, sources, ids, full_contents, case_extras
 
 
 def _build_detail_answer_payload_from_cases(
     case_index: int,
     cases: list[dict],
     with_recap: bool = True,
-) -> tuple[str, list[str], list[str], list[str]] | None:
+) -> tuple[str, list[str], list[str], list[str], list[dict[str, str | None]]] | None:
     """Construit le payload de détail côté answer (non-stream)."""
     if not (0 <= case_index < len(cases)):
         return None
-    content = (cases[case_index].get("content") or "").strip()
+    case_row = cases[case_index]
+    content = (case_row.get("content") or "").strip()
     if len(content) < 20:
         return None
-    case_content = _build_detail_input_with_recap(case_index + 1, cases, content) if with_recap else content
+    content_for_model = _append_structured_case_fields_to_content(content, case_row)
+    case_content = (
+        _build_detail_input_with_recap(case_index + 1, cases, content_for_model) if with_recap else content_for_model
+    )
     answer = _run_detail_pipeline(case_content)
     sources = [content[:400] + "..." if len(content) > 400 else content]
     ids = [c.get("id", "") for c in cases]
     full_contents = [c.get("content", "") for c in cases]
-    return answer, sources, ids, full_contents
+    case_extras = [_case_extras_from_case_dict(c) for c in cases]
+    return answer, sources, ids, full_contents, case_extras
 
 
 def get_rag_prompt_and_sources(
@@ -1814,9 +1879,10 @@ def get_rag_prompt_and_sources(
     selected_domain_code: str | None = None,
     selected_sector: str | None = None,
     selected_intention: str | None = None,
-) -> tuple[str, list[str], list[str], list[str], str | None, str | None, str | None]:
+) -> tuple[str, list[str], list[str], list[str], list[dict[str, str | None]], str | None, str | None, str | None]:
     """
-    Retourne (prompt, sources, suggested_case_ids, full_contents, selected_domain_code, selected_sector, selected_intention).
+    Retourne (prompt, sources, suggested_case_ids, full_contents, case_extras, selected_domain_code, selected_sector, selected_intention).
+    case_extras : métadonnées structurées par cas (effort, prérequis, etc.), même ordre que les ids.
     Utilise les sélections explicites du client et les met à jour avec le message courant.
     Les trois derniers éléments sont domaine/secteur/intention après ce message (à stocker côté client).
     """
@@ -1827,8 +1893,17 @@ def get_rag_prompt_and_sources(
         if idx is not None:
             payload = _build_detail_prompt_payload_from_cases(idx, last_suggested_cases)
             if payload is not None:
-                prompt, sources, ids, full_contents = payload
-                return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+                prompt, sources, ids, full_contents, case_extras = payload
+                return (
+                    prompt,
+                    sources,
+                    ids,
+                    full_contents,
+                    case_extras,
+                    selected_domain_code,
+                    selected_sector,
+                    selected_intention,
+                )
 
     # Affirmation + action en attente → prompt de détail pour ce cas (pas de mise à jour domaine/secteur)
     if _is_affirmation(question) and pending_action == "expand_details" and pending_use_case_id and last_suggested_cases:
@@ -1836,8 +1911,17 @@ def get_rag_prompt_and_sources(
             if (case.get("id") or "") == pending_use_case_id:
                 payload = _build_detail_prompt_payload_from_cases(i, last_suggested_cases)
                 if payload is not None:
-                    prompt, sources, ids, full_contents = payload
-                    return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+                    prompt, sources, ids, full_contents, case_extras = payload
+                    return (
+                        prompt,
+                        sources,
+                        ids,
+                        full_contents,
+                        case_extras,
+                        selected_domain_code,
+                        selected_sector,
+                        selected_intention,
+                    )
     # Affirmation « ok » sans pending_* : uniquement si on a last_suggested_cases (ordre fiable)
     if _is_affirmation(question) and last_suggested_cases:
         last_assistant = _get_last_assistant_message(history)
@@ -1846,16 +1930,34 @@ def get_rag_prompt_and_sources(
             if case_index_1based is not None and 1 <= case_index_1based <= len(last_suggested_cases):
                 payload = _build_detail_prompt_payload_from_cases(case_index_1based - 1, last_suggested_cases)
                 if payload is not None:
-                    prompt, sources, ids, full_contents = payload
-                    return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+                    prompt, sources, ids, full_contents, case_extras = payload
+                    return (
+                        prompt,
+                        sources,
+                        ids,
+                        full_contents,
+                        case_extras,
+                        selected_domain_code,
+                        selected_sector,
+                        selected_intention,
+                    )
 
     if last_suggested_cases and (_is_detail_request(question) or _has_explicit_point_number(question)):
         idx = _resolve_detail_selection(question, last_suggested_cases)
         if idx is not None:
             payload = _build_detail_prompt_payload_from_cases(idx, last_suggested_cases)
             if payload is not None:
-                prompt, sources, ids, full_contents = payload
-                return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+                prompt, sources, ids, full_contents, case_extras = payload
+                return (
+                    prompt,
+                    sources,
+                    ids,
+                    full_contents,
+                    case_extras,
+                    selected_domain_code,
+                    selected_sector,
+                    selected_intention,
+                )
 
     # Demande de détail en stream sans last_suggested_cases:
     # fallback par thème (même logique que _try_detail_flow en non-stream).
@@ -1866,18 +1968,33 @@ def get_rag_prompt_and_sources(
         else:
             previous = _get_previous_user_message(history)
             if previous:
-                docs = _retrieve_docs(previous)
+                previous_domain, _, previous_intention = _derive_selection_state_from_history(
+                    history,
+                    selected_domain_code=None,
+                    selected_sector=None,
+                    selected_intention=None,
+                )
+                docs = _retrieve_docs(
+                    previous,
+                    filters=_build_retrieval_filters(previous_domain, previous_intention),
+                )
                 if docs:
-                    cases_from_docs = [
-                        {"id": getattr(d, "id", None) or str(i), "content": d.content}
-                        for i, d in enumerate(docs)
-                    ]
+                    cases_from_docs = [_doc_to_case_dict(d, i) for i, d in enumerate(docs)]
                     idx = _resolve_detail_selection(question, cases_from_docs)
                     if idx is not None:
                         payload = _build_detail_prompt_payload_from_cases(idx, cases_from_docs, with_recap=True)
                         if payload is not None:
-                            prompt, sources, ids, full_contents = payload
-                            return prompt, sources, ids, full_contents, selected_domain_code, selected_sector, selected_intention
+                            prompt, sources, ids, full_contents, case_extras = payload
+                            return (
+                                prompt,
+                                sources,
+                                ids,
+                                full_contents,
+                                case_extras,
+                                selected_domain_code,
+                                selected_sector,
+                                selected_intention,
+                            )
 
     history_with_current, current_domain, current_sector, current_intention = _resolve_current_selection_state(
         history,
@@ -1890,8 +2007,12 @@ def get_rag_prompt_and_sources(
     conversation_history = _format_conversation_history(history)
     docs = []
     if _should_inject_rag_documents(current_domain, current_sector, current_intention):
-        docs = _retrieve_docs_for_question(question)
-    sources, suggested_case_ids, full_contents = _docs_to_payload(docs)
+        docs = _retrieve_docs_for_question(
+            question,
+            selected_domain_code=current_domain,
+            selected_intention=current_intention,
+        )
+    sources, suggested_case_ids, full_contents, case_extras = _docs_to_payload(docs)
     secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=current_domain)
     intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=current_domain)
     q3_triggers_affichage = _get_q3_triggers_affichage(
@@ -1900,9 +2021,12 @@ def get_rag_prompt_and_sources(
         selected_intention=current_intention,
     )
 
-    print("selected domain:", repr(current_domain))
-    print("selected scetor:", repr(current_sector))
-    print("selected intention:", repr(current_intention))
+    logger.debug(
+        "get_rag_prompt_and_sources selection domain=%r sector=%r intention=%r",
+        current_domain,
+        current_sector,
+        current_intention,
+    )
     prompt_text = _build_rag_prompt_from_docs(
         question,
         hint,
@@ -1916,14 +2040,14 @@ def get_rag_prompt_and_sources(
         selected_sector=current_sector,
         selected_intention=current_intention,
     )
-    print("--- PROMPT RAG (get_rag_prompt_and_sources) ---")
-    print(prompt_text or "Aucun contexte.")
-    print("--- FIN PROMPT ---")
+    _pt = prompt_text or "Aucun contexte."
+    logger.debug("get_rag_prompt_and_sources prompt_len=%s preview=%r", len(_pt), _pt[:1200])
     return (
         (prompt_text or "Aucun contexte."),
         sources,
         suggested_case_ids,
         full_contents,
+        case_extras,
         current_domain,
         current_sector,
         current_intention,
@@ -1934,11 +2058,11 @@ def _try_detail_flow(
     question: str,
     history: list[dict],
     last_suggested_cases: list[dict] | None,
-) -> tuple[str, list[str], list[str], list[str]] | None:
+) -> tuple[str, list[str], list[str], list[str], list[dict[str, str | None]]] | None:
     """
     Si la question est une demande de détail et qu'on peut déterminer quel cas (avec
     last_suggested_cases ou en refaisant une recherche avec le dernier message user),
-    retourne (answer, sources, suggested_case_ids, full_contents). Sinon None.
+    retourne (answer, sources, suggested_case_ids, full_contents, case_extras). Sinon None.
     """
     if not (_is_detail_request(question) or _has_explicit_point_number(question)):
         return None
@@ -1960,13 +2084,19 @@ def _try_detail_flow(
     previous = _get_previous_user_message(history)
     if not previous:
         return None
-    docs = _retrieve_docs(previous)
+    current_domain, _, current_intention = _derive_selection_state_from_history(
+        history,
+        selected_domain_code=None,
+        selected_sector=None,
+        selected_intention=None,
+    )
+    docs = _retrieve_docs(
+        previous,
+        filters=_build_retrieval_filters(current_domain, current_intention),
+    )
     if not docs:
         return None
-    cases_from_docs = [
-        {"id": getattr(d, "id", None) or str(i), "content": d.content}
-        for i, d in enumerate(docs)
-    ]
+    cases_from_docs = [_doc_to_case_dict(d, i) for i, d in enumerate(docs)]
     idx = _resolve_detail_selection(question, cases_from_docs)
     if idx is None:
         return None
@@ -1979,8 +2109,8 @@ def _try_detail_flow(
 def _execute_pending_expand_details(
     pending_use_case_id: str,
     last_suggested_cases: list[dict],
-) -> tuple[str, list[str], list[str], list[str]] | None:
-    """Exécute l'action expand_details pour le cas donné. Retourne (answer, sources, ids, full_contents) ou None."""
+) -> tuple[str, list[str], list[str], list[str], list[dict[str, str | None]]] | None:
+    """Exécute l'action expand_details pour le cas donné. Retourne (answer, sources, ids, full_contents, case_extras) ou None."""
     for idx, case in enumerate(last_suggested_cases):
         if (case.get("id") or "") == pending_use_case_id:
             return _build_detail_answer_payload_from_cases(idx, last_suggested_cases, with_recap=True)
@@ -1996,9 +2126,21 @@ def query_rag_haystack(
     selected_domain_code: str | None = None,
     selected_sector: str | None = None,
     selected_intention: str | None = None,
-) -> tuple[str, list[str], list[str], list[str], str | None, str | None, int | None, str | None, str | None, str | None]:
+) -> tuple[
+    str,
+    list[str],
+    list[str],
+    list[str],
+    list[dict[str, str | None]],
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    str | None,
+]:
     """
-    Interroge le RAG. Retourne (answer, sources, suggested_case_ids, full_contents, pending_action, pending_use_case_id, pending_case_index, selected_domain_code, selected_sector, selected_intention).
+    Interroge le RAG. Retourne (answer, sources, suggested_case_ids, full_contents, case_extras, pending_action, pending_use_case_id, pending_case_index, selected_domain_code, selected_sector, selected_intention).
     selected_domain_code/selected_sector/selected_intention : état explicite fourni par le client.
     Les trois derniers retours sont domaine/secteur/intention après ce message (à stocker côté client).
     """
@@ -2006,8 +2148,8 @@ def query_rag_haystack(
     if _is_affirmation(question) and pending_action == "expand_details" and pending_use_case_id and last_suggested_cases:
         result = _execute_pending_expand_details(pending_use_case_id, last_suggested_cases)
         if result is not None:
-            a, s, i, f = result
-            return a, s, i, f, None, None, None, selected_domain_code, selected_sector, selected_intention
+            a, s, i, f, x = result
+            return a, s, i, f, x, None, None, None, selected_domain_code, selected_sector, selected_intention
 
     # 2) Affirmation sans pending_* : inférer depuis le dernier message assistant (offre de détail)
     if _is_affirmation(question) and last_suggested_cases:
@@ -2017,14 +2159,26 @@ def query_rag_haystack(
             if case_index_1based is not None and 1 <= case_index_1based <= len(last_suggested_cases):
                 payload = _build_detail_answer_payload_from_cases(case_index_1based - 1, last_suggested_cases, with_recap=True)
                 if payload is not None:
-                    answer, sources, ids, full_contents = payload
-                    return answer, sources, ids, full_contents, None, None, None, selected_domain_code, selected_sector, selected_intention
+                    answer, sources, ids, full_contents, case_extras = payload
+                    return (
+                        answer,
+                        sources,
+                        ids,
+                        full_contents,
+                        case_extras,
+                        None,
+                        None,
+                        None,
+                        selected_domain_code,
+                        selected_sector,
+                        selected_intention,
+                    )
 
     # 3) Demande explicite de détail (« détaille le 2 »)
     detail_result = _try_detail_flow(question, history, last_suggested_cases)
     if detail_result is not None:
-        a, s, i, f = detail_result
-        return a, s, i, f, None, None, None, selected_domain_code, selected_sector, selected_intention
+        a, s, i, f, x = detail_result
+        return a, s, i, f, x, None, None, None, selected_domain_code, selected_sector, selected_intention
 
     # 4) Flux RAG normal : utiliser l'état explicite client, mis à jour par le message courant
     history_with_current, current_domain, current_sector, current_intention = _resolve_current_selection_state(
@@ -2038,8 +2192,12 @@ def query_rag_haystack(
     conversation_history = _format_conversation_history(history)
     docs = []
     if _should_inject_rag_documents(current_domain, current_sector, current_intention):
-        docs = _retrieve_docs_for_question(question)
-    sources, suggested_case_ids, full_contents = _docs_to_payload(docs)
+        docs = _retrieve_docs_for_question(
+            question,
+            selected_domain_code=current_domain,
+            selected_intention=current_intention,
+        )
+    sources, suggested_case_ids, full_contents, case_extras = _docs_to_payload(docs)
     secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=current_domain)
     intention_affichage = _get_intention_choices_affichage(history_with_current, domaine_code=current_domain)
     q3_triggers_affichage = _get_q3_triggers_affichage(
@@ -2047,8 +2205,7 @@ def query_rag_haystack(
         domaine_code=current_domain,
         selected_intention=current_intention,
     )
-    print("q3_triggers_affichage:", repr(q3_triggers_affichage))
-    print("currnet domain:", current_domain)
+    logger.debug("query_rag_haystack q3_triggers_affichage=%r domain=%r", q3_triggers_affichage, current_domain)
     prompt_text = _build_rag_prompt_from_docs(
         question,
         hint,
@@ -2062,9 +2219,8 @@ def query_rag_haystack(
         selected_sector=current_sector,
         selected_intention=current_intention,
     )
-    print("--- PROMPT RAG (query_rag_haystack) ---")
-    print(prompt_text or "Aucun contexte.")
-    print("--- FIN PROMPT ---")
+    _pt = prompt_text or "Aucun contexte."
+    logger.debug("query_rag_haystack prompt_len=%s preview=%r", len(_pt), _pt[:1200])
     generator = _get_generator()
     gen_result = generator.run(prompt=prompt_text)
     replies = gen_result.get("replies", [])
@@ -2080,6 +2236,7 @@ def query_rag_haystack(
             sources,
             suggested_case_ids,
             full_contents,
+            case_extras,
             "expand_details",
             pending_uid,
             pending_case_index,
@@ -2092,6 +2249,7 @@ def query_rag_haystack(
         sources,
         suggested_case_ids,
         full_contents,
+        case_extras,
         None,
         None,
         None,

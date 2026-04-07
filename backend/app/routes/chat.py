@@ -24,12 +24,44 @@ def _sse_line(obj: dict) -> str:
 def _last_suggested_cases_to_dicts(request: ChatRequest) -> list[dict] | None:
     if not request.last_suggested_cases:
         return None
-    return [{"id": c.id, "content": c.content} for c in request.last_suggested_cases]
+    out: list[dict] = []
+    for c in request.last_suggested_cases:
+        d: dict = {"id": c.id, "content": c.content}
+        if c.effort is not None:
+            d["effort"] = c.effort
+        if c.prerequis_donnees is not None:
+            d["prerequis_donnees"] = c.prerequis_donnees
+        if c.guardrails is not None:
+            d["guardrails"] = c.guardrails
+        if c.questions_qualification is not None:
+            d["questions_qualification"] = c.questions_qualification
+        if c.sensibilite_donnees is not None:
+            d["sensibilite_donnees"] = c.sensibilite_donnees
+        out.append(d)
+    return out
 
 
-def _build_suggested_cases(ids: list[str], full_contents: list[str]) -> list[SuggestedCase]:
+def _build_suggested_cases(
+    ids: list[str],
+    full_contents: list[str],
+    case_extras: list[dict[str, str | None]] | None = None,
+) -> list[SuggestedCase]:
     n = min(len(ids), len(full_contents))
-    return [SuggestedCase(id=ids[i], content=full_contents[i]) for i in range(n)]
+    rows: list[SuggestedCase] = []
+    for i in range(n):
+        ex = case_extras[i] if case_extras and i < len(case_extras) else {}
+        rows.append(
+            SuggestedCase(
+                id=ids[i],
+                content=full_contents[i],
+                effort=ex.get("effort"),
+                prerequis_donnees=ex.get("prerequis_donnees"),
+                guardrails=ex.get("guardrails"),
+                questions_qualification=ex.get("questions_qualification"),
+                sensibilite_donnees=ex.get("sensibilite_donnees"),
+            )
+        )
+    return rows
 
 
 @router.post("", response_model=ChatResponse)
@@ -48,6 +80,7 @@ def chat(request: ChatRequest):
                 sources,
                 suggested_case_ids,
                 full_contents,
+                case_extras,
                 pending_action,
                 pending_use_case_id,
                 pending_case_index,
@@ -64,7 +97,9 @@ def chat(request: ChatRequest):
                 selected_sector=request.selected_sector,
                 selected_intention=request.selected_intention,
             )
-            suggested_cases = _build_suggested_cases(suggested_case_ids, full_contents) if full_contents else None
+            suggested_cases = (
+                _build_suggested_cases(suggested_case_ids, full_contents, case_extras) if full_contents else None
+            )
             return ChatResponse(
                 answer=answer,
                 sources=sources,
@@ -94,6 +129,7 @@ def _stream_chat(request: ChatRequest):
                 sources,
                 suggested_case_ids,
                 full_contents,
+                case_extras,
                 selected_domain_code,
                 selected_sector,
                 selected_intention,
@@ -109,12 +145,12 @@ def _stream_chat(request: ChatRequest):
             )
             for chunk in stream_prompt(prompt_text):
                 yield _sse_line({"t": chunk})
-            suggested_cases = _build_suggested_cases(suggested_case_ids, full_contents)
+            suggested_cases = _build_suggested_cases(suggested_case_ids, full_contents, case_extras)
             done_payload = {
                 "done": True,
                 "sources": sources,
                 "suggested_case_ids": suggested_case_ids,
-                "suggested_cases": [{"id": c.id, "content": c.content} for c in suggested_cases],
+                "suggested_cases": [c.model_dump(exclude_none=True) for c in suggested_cases],
                 "selected_domain_code": selected_domain_code,
                 "selected_sector": selected_sector,
                 "selected_intention": selected_intention,

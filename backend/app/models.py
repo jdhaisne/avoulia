@@ -14,6 +14,15 @@ class SuggestedCase(BaseModel):
 
     id: str = Field(..., description="Identifiant du cas")
     content: str = Field(..., description="Contenu du cas (complet pour le détail)")
+    effort: Optional[str] = Field(default=None, description="Niveau d'effort (colonne source)")
+    prerequis_donnees: Optional[str] = Field(default=None, description="Prérequis données")
+    guardrails: Optional[str] = Field(default=None, description="Guardrails / vigilance opérationnelle")
+    questions_qualification: Optional[str] = Field(
+        default=None, description="Questions de qualification (auto-diagnostic)"
+    )
+    sensibilite_donnees: Optional[str] = Field(
+        default=None, description="Sensibilité des données (contexte vigilance)"
+    )
 
 
 class ChatRequest(BaseModel):

@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # USE_RAG : si True, le chat utilise les documents indexés (Chroma) pour répondre ; sinon chat simple (LLM seul)
     use_rag: bool = True
 
+    # DEBUG (env DEBUG) : True → niveau logging DEBUG pour le package app (ex. app.haystack_rag).
+    debug: bool = True
+
     @property
     def use_azure_openai(self) -> bool:
         return bool(self.azure_openai_api_key and self.azure_openai_endpoint)
