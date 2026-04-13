@@ -1,3 +1,20 @@
+## Objectif
+Chatbot open source pour aider à explorer et structurer des cas d’usage de
+l’IA.
+## Transparence &amp; limites
+- Système IA : réponses potentiellement inexactes.
+- Ne saisissez pas de données personnelles ou confidentielles.
+- Ne constitue pas un conseil professionnel.
+## Données &amp; confidentialité
+- Pas de compte requis.
+- Pas de conservation de l’historique (voir PRIVACY.md).
+- Messages envoyés à Azure OpenAI (voir FAQ).
+## Licence
+[MIT ou Apache-2.0]
+## Marques
+Les noms et logos de Microsoft et Simplon ne sont pas concédés par la
+licence open source.
+
 # Chatbot RAG – FastAPI + Vue
 
 Application de recherche de documents par question/réponse (RAG) : backend FastAPI, **Chroma** (stockage vectoriel) + **Haystack** (pipelines RAG), LLM OpenAI ou Azure, frontend Vue 3.
