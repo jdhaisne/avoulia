@@ -172,6 +172,12 @@ async function submit() {
             Envoyer
           </button>
         </form>
+        <p class="chat-disclaimer">
+          Vous interagissez avec un assistant IA. Les réponses peuvent être inexactes
+          ou incomplètes.
+          Ne saisissez pas de données personnelles, confidentielles ou sensibles.
+          Vérifiez et adaptez les résultats avant utilisation.
+        </p>
       </div>
     </section>
   </div>
@@ -368,5 +374,12 @@ async function submit() {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-mute);
+}
+
+.chat-disclaimer {
+  margin: 0.75rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--color-text-muted);
 }
 </style>

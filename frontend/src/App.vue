@@ -12,6 +12,18 @@ import { RouterLink, RouterView } from 'vue-router'
     <main class="app-main">
       <RouterView />
     </main>
+    <footer class="app-footer">
+      <p>
+        Ce chatbot est opéré par Simplon, avec le soutien technologique de
+        Microsoft. Il fournit des idées pour explorer des cas d’usage de l’IA
+        générative. Il ne constitue pas un conseil professionnel.
+      </p>
+      <div class="footer-links">
+        <RouterLink to="/confidentialite" class="footer-link">NOTICE DE CONFIDENTIALITE</RouterLink>
+        <RouterLink to="/faq" class="footer-link">FAQ</RouterLink>
+        <RouterLink to="/conditions-utilisation" class="footer-link">CONDITIONS D’UTILISATION</RouterLink>
+      </div>
+    </footer>
   </div>
 </template>
 
@@ -48,6 +60,35 @@ import { RouterLink, RouterView } from 'vue-router'
 
 .app-main {
   flex: 1;
+}
+
+.app-footer {
+  padding: 0.9rem 1.5rem 1.1rem;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-background-soft);
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.app-footer p {
+  margin: 0 0 0.35rem;
+}
+
+.footer-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.footer-links {
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.footer-link:hover {
+  text-decoration: underline;
 }
 
 @media (hover: hover) {
