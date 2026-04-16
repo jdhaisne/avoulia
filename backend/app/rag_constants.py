@@ -158,4 +158,4 @@ CASE_EXTRA_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 CASE_EXTRA_KEYS: tuple[str, ...] = tuple(CASE_EXTRA_FIELD_ALIASES.keys())
 
 # Limite d’exemples de situations affichés pour Q3.
-Q3_TRIGGERS_DISPLAY_LIMIT = 12
+Q3_TRIGGERS_DISPLAY_LIMIT = 6

@@ -18,19 +18,30 @@ def _configure_app_logging() -> None:
     Si Settings.debug est True : niveau DEBUG pour `app` et sous-loggers, avec handler dédié.
     (Sinon les DEBUG seraient filtrés par le logger racine souvent à INFO sous uvicorn.)
     """
+    level = logging.DEBUG if settings.debug else logging.INFO
+
+    # Uvicorn configure souvent le logging racine ; on force le niveau voulu ici.
+    root = logging.getLogger()
+    root.setLevel(level)
+
     pkg = logging.getLogger("app")
+    pkg.setLevel(level)
     if settings.debug:
-        pkg.setLevel(logging.DEBUG)
         if not pkg.handlers:
             handler = logging.StreamHandler()
-            handler.setLevel(logging.DEBUG)
             handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
             pkg.addHandler(handler)
+        for handler in pkg.handlers:
+            handler.setLevel(logging.DEBUG)
         pkg.propagate = False
     else:
-        pkg.setLevel(logging.INFO)
         pkg.handlers.clear()
         pkg.propagate = True
+
+    # Harmonise aussi les loggers uvicorn pour voir les traces DEBUG au runtime.
+    logging.getLogger("uvicorn").setLevel(level)
+    logging.getLogger("uvicorn.error").setLevel(level)
+    logging.getLogger("uvicorn.access").setLevel(level)
 
 
 _configure_app_logging()

@@ -79,6 +79,7 @@ def _doc_matches_domain(doc, label: str, domaine_code: str) -> bool:
 
 def _get_intention_from_meta(meta: dict) -> str:
     """Extrait la valeur intention depuis les meta (plusieurs noms de colonnes possibles)."""
+
     for key in INTENTION_META_KEYS:
         val = (meta.get(key) or "").strip()
         if val:
@@ -181,9 +182,55 @@ def _build_metadata_or_filter(meta_keys: tuple[str, ...], values: list[str | Non
     return {"operator": "OR", "conditions": conditions}
 
 
+SECTEUR_META_KEYS = (
+    "secteur",
+    "Secteur",
+    "sector",
+    "Sector",
+    "secteur_activite",
+    "secteur_activité",
+)
+MULTI_SECTOR_VALUES = ("multi-sectoriel", "multisectoriel", "multi sectoriel")
+
+
+def _normalize_metadata_value(value: str | None) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).lower()
+
+
+def _is_multisector_label(value: str) -> bool:
+    normalized = _normalize_metadata_value(value)
+    if not normalized:
+        return False
+    return any(token in normalized for token in MULTI_SECTOR_VALUES)
+
+
+def _doc_matches_sector(doc, selected_sector: str, *, include_multisector: bool = False) -> bool:
+    """True si le document correspond au secteur choisi (ou multi-sectoriel autorisé)."""
+    if not selected_sector:
+        return False
+    expected = _normalize_metadata_value(selected_sector)
+    meta = getattr(doc, "meta", None) or {}
+    for key in SECTEUR_META_KEYS:
+        raw = str(meta.get(key) or "").strip()
+        if not raw:
+            continue
+        normalized = _normalize_metadata_value(raw)
+        if normalized == expected:
+            return True
+        # Tolère des valeurs concaténées (ex: "BTP / Industrie").
+        tokens = [_normalize_metadata_value(t) for t in re.split(r"[,;/|]", raw)]
+        if expected in tokens:
+            return True
+        if include_multisector and _is_multisector_label(raw):
+            return True
+    return False
+
+
 def _build_retrieval_filters(
     domaine_code: str | None = None,
     intention_code: str | None = None,
+    selected_sector: str | None = None,
+    include_multisector: bool = False,
 ) -> dict | None:
     """Construit les filtres metadata appliqués avant le retrieval vectoriel."""
     conditions: list[dict] = []
@@ -194,13 +241,20 @@ def _build_retrieval_filters(
         conditions.append(domain_filter)
 
     intention_label = (
-        _get_intention_label_from_code(domaine_code, intention_code)
+        _get_intention_label_from_code(domaine_code, intention_code, secteur_choisi=selected_sector)
         if domaine_code and intention_code
         else None
     )
     intention_filter = _build_metadata_or_filter(INTENTION_META_KEYS, [intention_label])
     if intention_filter:
         conditions.append(intention_filter)
+
+    sector_values: list[str | None] = [selected_sector]
+    if include_multisector:
+        sector_values.extend(MULTI_SECTOR_VALUES)
+    sector_filter = _build_metadata_or_filter(SECTEUR_META_KEYS, sector_values)
+    if sector_filter:
+        conditions.append(sector_filter)
 
     if not conditions:
         return None
@@ -295,17 +349,148 @@ def _get_triggers_from_store(domaine_code: str, intention: str | None = None) ->
     return sorted(out)
 
 
-def get_q2_choices(domaine_code: str) -> list[str]:
-    """Retourne la liste des intentions (objectifs) pour Q2 pour ce domaine. Constante puis fallback Chroma."""
-    prefill = INTENTIONS_PAR_DOMAINE.get(domaine_code, [])
-    if prefill:
-        return list(prefill)
-    return _get_intentions_from_store(domaine_code)
+def _get_doc_sector_score(doc, secteur_choisi: str | None) -> int:
+    """Score secteur pour un doc: 3=secteur exact, 2=multi-sectoriel, 1=autre."""
+    if not secteur_choisi:
+        return 1
+    selected_norm = _normalize_metadata_value(secteur_choisi)
+    for key in SECTEUR_META_KEYS:
+        raw = str((getattr(doc, "meta", None) or {}).get(key) or "").strip()
+        if not raw:
+            continue
+        normalized = _normalize_metadata_value(raw)
+        if normalized == selected_norm:
+            return 3
+        tokens = [_normalize_metadata_value(t) for t in re.split(r"[,;/|]", raw)]
+        if selected_norm in tokens:
+            return 3
+        if _is_multisector_label(raw):
+            return 2
+    return 1
 
 
-def get_q3_triggers(domaine_code: str, intention: str | None = None) -> list[str]:
+def build_pool(
+    domaine_code: str,
+    intention: str | None = None,
+    secteur_choisi: str | None = None,
+    top_k: int | None = None,
+) -> list[str]:
+    """
+    Construit le pool Q3 trié:
+    - score 3 si secteur doc == secteur utilisateur
+    - score 2 si secteur doc == Multi-sectoriel
+    - score 1 sinon
+    Restitue les triggers triés par score DESC (puis alpha), limités à top_k si fourni.
+    """
+    docs = _fetch_documents_for_domaine(domaine_code)
+
+    if intention:
+        intention_norm = _normalize_metadata_value(intention)
+        docs = [
+            d
+            for d in docs
+            if _normalize_metadata_value(_get_intention_from_meta(getattr(d, "meta", None) or {}))
+            == intention_norm
+        ] or docs
+
+    # Conserver le meilleur score par trigger.
+    trigger_scores: dict[str, int] = {}
+    for doc in docs:
+        trigger = _get_trigger_from_meta(getattr(doc, "meta", None) or {})
+        if not trigger:
+            continue
+        score = _get_doc_sector_score(doc, secteur_choisi)
+        prev = trigger_scores.get(trigger)
+        if prev is None or score > prev:
+            trigger_scores[trigger] = score
+
+    ranked = sorted(trigger_scores.items(), key=lambda item: (-item[1], item[0].lower()))
+    triggers = [trigger for trigger, _ in ranked]
+    if top_k is not None and top_k > 0:
+        return triggers[:top_k]
+    return triggers
+
+
+def get_q2_choices(
+    domaine_code: str,
+    secteur_choisi: str | None = None,
+) -> list[str] | dict[str, str | bool]:
+    """
+    Pseudo-code :
+    intentions = set(c[intention] for c in base if c[domaine] == domaine)
+    if secteur_choisi and secteur_choisi != 'Autre':
+        intentions = [i for i in intentions
+            if any(c[secteur] in (secteur_choisi, 'Multi-sectoriel')
+                for c in base
+                if c[domaine] == domaine and c[intention] == i)]
+    if not intentions:
+        return {'fallback': True, 'message': '...'}
+    """
+    def _doc_has_multisector_case(candidate_doc) -> bool:
+        """True si le doc porte au moins un champ secteur contenant 'Multi-sectoriel'."""
+        meta = getattr(candidate_doc, "meta", None) or {}
+        for key in SECTEUR_META_KEYS:
+            raw = str(meta.get(key) or "").strip()
+            if raw and _is_multisector_label(raw):
+                return True
+        return False
+
+    docs = _fetch_documents_for_domaine(domaine_code)
+
+    intentions_set: set[str] = set()
+    for doc in docs:
+        intention = _get_intention_from_meta(getattr(doc, "meta", None) or {})
+        if intention:
+            intentions_set.add(intention)
+
+    if not intentions_set:
+        return {"fallback": True, "message": "Aucune intention disponible. Explorer un autre domaine ?"}
+
+    # Pas de filtre si secteur Q1.5 non fourni.
+    if not secteur_choisi:
+        return sorted(intentions_set)
+
+    secteur_norm = _normalize_metadata_value(secteur_choisi)
+    filter_for_autre = secteur_norm.startswith("autre")
+
+    filtered: list[str] = []
+    for intention in sorted(intentions_set):
+        intention_norm = _normalize_metadata_value(intention)
+
+        has_sector_case = any(
+            _normalize_metadata_value(_get_intention_from_meta(getattr(candidate_doc, "meta", None) or {})) == intention_norm
+            and (
+                _doc_has_multisector_case(candidate_doc)
+                if filter_for_autre
+                else _doc_matches_sector(candidate_doc, secteur_choisi, include_multisector=True)
+            )
+            for candidate_doc in docs
+        )
+        if has_sector_case:
+            filtered.append(intention)
+
+    if not filtered:
+        return {"fallback": True, "message": "Aucune intention disponible. Explorer un autre domaine ?"}
+
+    return filtered
+
+
+def _get_q2_choices_list(domaine_code: str, secteur_choisi: str | None = None) -> list[str]:
+    """Retourne toujours une liste de choix Q2, même si get_q2_choices est en mode fallback."""
+    result = get_q2_choices(domaine_code, secteur_choisi=secteur_choisi)
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def get_q3_triggers(
+    domaine_code: str,
+    intention: str | None = None,
+    secteur_choisi: str | None = None,
+    top_k: int | None = None,
+) -> list[str]:
     """Retourne la liste des triggers (exemples de situations) pour Q3 pour ce domaine, optionnellement pour cette intention."""
-    return _get_triggers_from_store(domaine_code, intention)
+    return build_pool(domaine_code, intention, secteur_choisi=secteur_choisi, top_k=top_k)
 
 
 def _secret(key: str) -> Secret:
@@ -401,6 +586,16 @@ Tu poses des questions fermées successives.
 Tu n'interprètes jamais librement les réponses.
 Tu ne modifies jamais le domaine ou l'intention sans validation
 explicite.
+
+SÉQUENCE OBLIGATOIRE — NE JAMAIS DÉROGER :
+Avant de présenter des cas, tu DOIS avoir reçu
+une réponse à CHAQUE étape dans cet ordre :
+ÉTAPE 1 — Q1 (domaine) → obligatoire
+ÉTAPE 2 — Q1.5 (secteur) → obligatoire si secteurs
+ÉTAPE 3 — Q2 (intention) → obligatoire, FORMAT LISTE
+ÉTAPE 4 — Q2.5 → si déclenché
+ÉTAPE 5 — Q3 (problème) → obligatoire
+Tu ne présentes JAMAIS de cas avant 5 étapes complètes.
 
 -------------------------------------
 INTRODUCTION
@@ -529,9 +724,14 @@ Règle stricte :
 Q2 — Objectif principal
 -------------------------------------
 
-Tu poses EXACTEMENT :
+Tu poses Q2 UNIQUEMENT sous cette forme exacte :
+« Quel est votre objectif principal dans ce domaine ?
+1. [intention_1]
+2. [intention_2] ... »
 
-"Quel est votre objectif principal dans ce domaine ?"
+Tu n’utilises JAMAIS une formulation ouverte pour Q2.
+Si aucune intention n’est disponible, tu réponds :
+« Je n’ai pas pu charger les objectifs. Reformulez. »
 
 Règles :
 - Tu proposes uniquement les intentions correspondant au domaine
@@ -1452,11 +1652,13 @@ def _parse_intention_code_from_message(text: str, choices: list[str]) -> str | N
         return None
 
 
-def _get_intention_label_from_code(domaine_code: str, intention_code: str | None) -> str | None:
+def _get_intention_label_from_code(
+    domaine_code: str, intention_code: str | None, secteur_choisi: str | None = None
+) -> str | None:
     """Traduit un code d'intention (1..N) en libellé Q2 pour un domaine donné."""
     if not domaine_code or not intention_code:
         return None
-    choices = get_q2_choices(domaine_code)
+    choices = _get_q2_choices_list(domaine_code, secteur_choisi=secteur_choisi)
     if not choices:
         return None
     try:
@@ -1505,7 +1707,7 @@ def _resolve_selection_state(
         if parsed_sector and parsed_sector != current_sector:
             return current_domain, parsed_sector, None
 
-    intention_choices = get_q2_choices(current_domain)
+    intention_choices = _get_q2_choices_list(current_domain, secteur_choisi=current_sector)
     if intention_choices:
         parsed_intention_code = _parse_intention_code_from_message(question, intention_choices)
         if parsed_intention_code:
@@ -1580,7 +1782,7 @@ def _derive_selection_state_from_history(
             continue
 
         if expected_step == "intention":
-            intention_choices = get_q2_choices(current_domain)
+            intention_choices = _get_q2_choices_list(current_domain, secteur_choisi=current_sector)
             parsed_intention_code = _parse_intention_code_from_message(content, intention_choices) if intention_choices else None
             if parsed_intention_code:
                 current_intention = parsed_intention_code
@@ -1595,7 +1797,7 @@ def _derive_selection_state_from_history(
                 current_sector = parsed_sector
                 current_intention = None
                 continue
-        intention_choices = get_q2_choices(current_domain)
+        intention_choices = _get_q2_choices_list(current_domain, secteur_choisi=current_sector)
         parsed_intention_code = _parse_intention_code_from_message(content, intention_choices) if intention_choices else None
         if parsed_intention_code:
             current_intention = parsed_intention_code
@@ -1630,7 +1832,8 @@ def _get_intention_from_history(
     """
     if not selected_domain_code:
         return None
-    choices = get_q2_choices(selected_domain_code)
+    sector = _get_sector_from_history(history, current_message=current_message)
+    choices = _get_q2_choices_list(selected_domain_code, secteur_choisi=sector)
     if not choices:
         return None
     history_with_current = history + ([{"role": "user", "content": current_message}] if current_message else [])
@@ -1676,7 +1879,9 @@ def _get_secteur_choices_affichage(history: list[dict], domaine_code: str | None
     return "\n".join(f"{i}. {s}" for i, s in enumerate(choices, start=1))
 
 
-def _get_intention_choices_affichage(history: list[dict], domaine_code: str | None = None) -> str:
+def _get_intention_choices_affichage(
+    history: list[dict], domaine_code: str | None = None, secteur_choisi: str | None = None
+) -> str:
     """
     Retourne la liste des intentions (Q2) pour le domaine choisi, formatée pour affichage.
     Si domaine_code est fourni (ex. stocké après Q1), il est réutilisé ; sinon déduit de l'historique.
@@ -1687,7 +1892,8 @@ def _get_intention_choices_affichage(history: list[dict], domaine_code: str | No
         domaine_code = _get_domaine_code_from_history(history)
     if not domaine_code:
         return ""
-    choices = get_q2_choices(domaine_code)
+    resolved_sector = secteur_choisi if secteur_choisi is not None else _get_sector_from_history(history)
+    choices = _get_q2_choices_list(domaine_code, secteur_choisi=resolved_sector)
     if not choices:
         return ""
     return "\n".join(f"{i}. {s}" for i, s in enumerate(choices, start=1))
@@ -1697,6 +1903,7 @@ def _get_q3_triggers_affichage(
     history: list[dict],
     domaine_code: str | None = None,
     selected_intention: str | None = None,
+    selected_sector: str | None = None,
 ) -> str:
     """
     Retourne la liste des triggers (exemples de situations) pour Q3, formatée pour affichage (tirets).
@@ -1707,12 +1914,18 @@ def _get_q3_triggers_affichage(
         return ""
     if not selected_intention:
         return ""
-    intention = _get_intention_label_from_code(domaine_code, selected_intention)
-    triggers = get_q3_triggers(domaine_code, intention)
+    intention = _get_intention_label_from_code(
+        domaine_code, selected_intention, secteur_choisi=selected_sector
+    )
+    triggers = get_q3_triggers(
+        domaine_code,
+        intention,
+        secteur_choisi=selected_sector,
+        top_k=Q3_TRIGGERS_DISPLAY_LIMIT,
+    )
     if not triggers:
         return ""
-    limited = triggers[:Q3_TRIGGERS_DISPLAY_LIMIT]
-    return "\n".join(f"- {t}" for t in limited)
+    return "\n".join(f"- {t}" for t in triggers)
 
 
 def _get_rag_hint(history: list[dict]) -> str:
@@ -1798,18 +2011,71 @@ def _retrieve_docs_for_question(
     question: str,
     selected_domain_code: str | None = None,
     selected_intention: str | None = None,
+    selected_sector: str | None = None,
 ) -> list:
-    """Récupère les documents pertinents pour la question (avec flatten si nested list)."""
-    retrieval_filters = _build_retrieval_filters(
-        domaine_code=selected_domain_code,
-        intention_code=selected_intention,
+    """Récupère les documents pertinents via fallback progressif des filtres."""
+
+    def _run_retrieval(filters: dict | None) -> list:
+        retrieval_pipeline = build_rag_retrieval_only_pipeline(filters=filters)
+        result = retrieval_pipeline.run({"embedder": {"text": question}})
+        docs = result.get("retriever", {}).get("documents") or []
+        if docs and isinstance(docs[0], list):
+            docs = [d for sub in docs for d in sub]
+        return docs
+
+    min_docs = 3
+    if not selected_sector:
+        return _run_retrieval(
+            _build_retrieval_filters(
+                domaine_code=selected_domain_code,
+                intention_code=selected_intention,
+            )
+        )
+
+    # Étape 1: domaine + intention + secteur (AND)
+    docs = _run_retrieval(
+        _build_retrieval_filters(
+            domaine_code=selected_domain_code,
+            intention_code=selected_intention,
+            selected_sector=selected_sector,
+        )
     )
-    retrieval_pipeline = build_rag_retrieval_only_pipeline(filters=retrieval_filters)
-    result = retrieval_pipeline.run({"embedder": {"text": question}})
-    docs = result.get("retriever", {}).get("documents") or []
-    if docs and isinstance(docs[0], list):
-        docs = [d for sub in docs for d in sub]
-    return docs
+    if len(docs) >= min_docs:
+        return docs
+
+    # Étape 2: relâcher intention, garder domaine + secteur
+    docs = _run_retrieval(
+        _build_retrieval_filters(
+            domaine_code=selected_domain_code,
+            selected_sector=selected_sector,
+        )
+    )
+    if len(docs) >= min_docs:
+        return docs
+
+    # Étape 3: domaine + intention + (secteur OR multi-sectoriel)
+    docs = _run_retrieval(
+        _build_retrieval_filters(
+            domaine_code=selected_domain_code,
+            intention_code=selected_intention,
+            selected_sector=selected_sector,
+            include_multisector=True,
+        )
+    )
+    if len(docs) >= min_docs:
+        return docs
+
+    # Étape 4: retrieval sans filtre secteur, puis post-filtrage Python sur secteur.
+    broad_docs = _run_retrieval(
+        _build_retrieval_filters(
+            domaine_code=selected_domain_code,
+            intention_code=selected_intention,
+        )
+    )
+    post_filtered = [
+        doc for doc in broad_docs if _doc_matches_sector(doc, selected_sector, include_multisector=True)
+    ]
+    return post_filtered or broad_docs
 
 
 def _docs_to_payload(docs: list) -> tuple[list[str], list[str], list[str], list[dict[str, str | None]]]:
@@ -2011,6 +2277,7 @@ def get_rag_prompt_and_sources(
             question,
             selected_domain_code=current_domain,
             selected_intention=current_intention,
+            selected_sector=current_sector,
         )
     sources, suggested_case_ids, full_contents, case_extras = _docs_to_payload(docs)
     secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=current_domain)
@@ -2019,6 +2286,7 @@ def get_rag_prompt_and_sources(
         history_with_current,
         domaine_code=current_domain,
         selected_intention=current_intention,
+        selected_sector=current_sector,
     )
 
     logger.debug(
@@ -2196,6 +2464,7 @@ def query_rag_haystack(
             question,
             selected_domain_code=current_domain,
             selected_intention=current_intention,
+            selected_sector=current_sector,
         )
     sources, suggested_case_ids, full_contents, case_extras = _docs_to_payload(docs)
     secteur_affichage = _get_secteur_choices_affichage(history_with_current, domaine_code=current_domain)
@@ -2204,6 +2473,7 @@ def query_rag_haystack(
         history_with_current,
         domaine_code=current_domain,
         selected_intention=current_intention,
+        selected_sector=current_sector,
     )
     logger.debug("query_rag_haystack q3_triggers_affichage=%r domain=%r", q3_triggers_affichage, current_domain)
     prompt_text = _build_rag_prompt_from_docs(
