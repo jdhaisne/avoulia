@@ -24,7 +24,7 @@
 
     <p>
       <strong>Q5. Comment signaler un problème ?</strong>
-      Contactez [EMAIL_SUPPORT].
+      Contactez si@simplon.co.
     </p>
   </section>
 </template>

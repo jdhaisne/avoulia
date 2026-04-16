@@ -23,7 +23,7 @@
       s’appliquer en pratique.
     </p>
 
-    <p><strong>5) Contact</strong> — Pour toute question :</p>
+    <p><strong>5) Contact</strong> — Pour toute question : rgpd@simplon.co</p>
   </section>
 </template>
 
